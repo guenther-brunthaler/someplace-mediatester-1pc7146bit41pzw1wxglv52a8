@@ -11,15 +11,11 @@ scan:
 		printf 'SOURCES = \\\n'; \
 		ls *.c | LC_COLLATE=C sort | { \
 			while IFS= read -r src; do \
-				printf '%s\n' "$$src" >& 8; \
-				tgt=$${src%.*}; \
-				echo "$$tgt: $$tgt.o "'$$(LIB)'; \
-				echo "$$t"'$$(CC) $$(LDFLAGS) -o $$@' \
-					"$$tgt.o "'$$(LIB)'; \
-			done 8>& 1 >& 9; \
+				printf '%s\n' "$$src"; \
+			done; \
 		} | sed "s/^/$$t/; "'s/$$/ \\/'; \
 		echo; \
-	} > sources.mk 9> targets.mk
+	} > sources.mk
 
 depend_helper:
 	T1=`mktemp $${TMPDIR:-/tmp}/mkdepend.T1_XXXXXXXXXX`; \

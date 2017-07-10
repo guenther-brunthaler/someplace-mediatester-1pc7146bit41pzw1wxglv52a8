@@ -1,32 +1,29 @@
-LIB = $(LIBDIR)/lib$(LIBDIR).a
+LIB = lib$(LIBNAME).a
 OBJECTS = $(SOURCES:.c=.o)
 TARGETS = $(OBJECTS:.o=)
 
-LIBDIR = common
+LIBNAME = RENAME_ME__name_of_library_wo_lib_prefix
 INC_SUBDIR = include
 
-.PHONY: all clean deepclean
+.PHONY: all clean
 
 include sources.mk
 
-all: $(TARGETS)
+all: $(LIB)
 
 clean:
 	-rm $(TARGETS) $(OBJECTS)
 
-deepclean: clean
-	cd $(LIBDIR) && $(MAKE) clean
-
 COMBINED_CFLAGS= $(CPPFLAGS) $(CFLAGS)
-AUG_CFLAGS = $(COMBINED_CFLAGS) -I $(LIBDIR)/$(INC_SUBDIR)
+AUG_CFLAGS = $(COMBINED_CFLAGS) -I $(INC_SUBDIR)
 
 .c.o:
 	$(CC) $(AUG_CFLAGS) -c $<
 
+$(LIB): $(OBJECTS)
+	$(AR) $(ARFLAGS) $@ $(OBJECTS)
+
 include dependencies.mk
 include targets.mk
-
-$(LIB):
-	cd $(LIBDIR) && $(MAKE)
 
 include maintainer.mk # Rules not required for just building the application.

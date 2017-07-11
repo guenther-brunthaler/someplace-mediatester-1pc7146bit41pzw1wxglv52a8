@@ -11,7 +11,7 @@ include sources.mk
 all: $(LIB)
 
 clean:
-	-rm $(OBJECTS)
+	-rm $(OBJECTS) $(LIB)
 
 COMBINED_CFLAGS= $(CPPFLAGS) $(CFLAGS)
 AUG_CFLAGS = $(COMBINED_CFLAGS) -I $(INC_SUBDIR)

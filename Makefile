@@ -1,9 +1,10 @@
-LIB = $(LIBDIR)/lib$(LIBDIR).a
+LIB_1_A = $(LIB_1_SUBDIR)/lib$(LIB_1_SUBDIR).a
+LIBS = $(LIB_1_A)
 OBJECTS = $(SOURCES:.c=.o)
 TARGETS = $(OBJECTS:.o=)
 
-LIBDIR =  RENAME_ME__name_of_subdir_containing_a_helper_library
-INC_SUBDIR = include
+LIB_1_SUBDIR =  RENAME_ME__name_of_subdir_containing_a_helper_library
+LIB_1_INC_SUBDIR = include
 
 .PHONY: all clean deepclean
 
@@ -15,10 +16,10 @@ clean:
 	-rm $(TARGETS) $(OBJECTS)
 
 deepclean: clean
-	cd $(LIBDIR) && $(MAKE) clean
+	for lib in $@; do cd "`dirname "$$lib"`" && $(MAKE) clean; done
 
 COMBINED_CFLAGS= $(CPPFLAGS) $(CFLAGS)
-AUG_CFLAGS = $(COMBINED_CFLAGS) -I $(LIBDIR)/$(INC_SUBDIR)
+AUG_CFLAGS = $(COMBINED_CFLAGS) -I $(LIB_1_SUBDIR)/$(LIB_1_INC_SUBDIR)
 
 .c.o:
 	$(CC) $(AUG_CFLAGS) -c $<
@@ -26,7 +27,7 @@ AUG_CFLAGS = $(COMBINED_CFLAGS) -I $(LIBDIR)/$(INC_SUBDIR)
 include dependencies.mk
 include targets.mk
 
-$(LIB):
-	cd $(LIBDIR) && $(MAKE)
+$(LIBS):
+	for lib in $@; do cd "`dirname "$$lib"`" && $(MAKE); done
 
 include maintainer.mk # Rules not required for just building the application.

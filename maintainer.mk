@@ -13,9 +13,9 @@ scan:
 			while IFS= read -r src; do \
 				printf '%s\n' "$$src" >& 8; \
 				tgt=$${src%.*}; \
-				echo "$$tgt: $$tgt.o "'$$(LIB)'; \
+				echo "$$tgt: $$tgt.o "'$$(LIBS)'; \
 				echo "$$t"'$$(CC) $$(LDFLAGS) -o $$@' \
-					"$$tgt.o "'$$(LIB)'; \
+					"$$tgt.o "'$$(LIBS)'; \
 			done 8>& 1 >& 9; \
 		} | sed "s/^/$$t/; "'s/$$/ \\/'; \
 		echo; \

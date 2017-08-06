@@ -16,7 +16,7 @@ clean:
 	-rm $(TARGETS) $(OBJECTS)
 
 deepclean: clean
-	for lib in $@; do cd "`dirname "$$lib"`" && $(MAKE) clean; done
+	for lib in $(LIBS); do cd "`dirname "$$lib"`" && $(MAKE) clean; done
 
 COMBINED_CFLAGS= $(CPPFLAGS) $(CFLAGS)
 AUG_CFLAGS = $(COMBINED_CFLAGS) -I $(LIB_1_SUBDIR)/$(LIB_1_INC_SUBDIR)

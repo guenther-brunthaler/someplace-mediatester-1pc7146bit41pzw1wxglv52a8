@@ -2,7 +2,7 @@ OBJECTS = $(SOURCES:.c=.o)
 TARGETS = $(OBJECTS:.o=)
 LIBS = $(LIB_1_SUBDIR)/lib$(LIB_1_SUBDIR).a
 
-LIB_1_SUBDIR =  RENAME_ME__name_of_subdir_containing_a_helper_library
+LIB_1_SUBDIR =  lib
 LIB_1_INC_SUBDIR = include
 
 .PHONY: all clean deepclean

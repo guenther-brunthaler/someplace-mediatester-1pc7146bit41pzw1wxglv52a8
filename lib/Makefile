@@ -1,7 +1,7 @@
 LIB = lib$(LIBNAME).a
 OBJECTS = $(SOURCES:.c=.o)
 
-LIBNAME = RENAME_ME__name_of_library_wo_lib_prefix
+LIBNAME = fragments
 INC_SUBDIR = include
 
 .PHONY: all clean

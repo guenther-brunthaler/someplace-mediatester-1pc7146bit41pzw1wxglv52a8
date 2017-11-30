@@ -3,7 +3,9 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
-
+#include <sys/types.h>
+#include <unistd.h>
+              
 static uint_fast64_t atou64(char const **error, char const *numeric) {
    uint_fast64_t v= 0, nv;
    unsigned digit, i;
@@ -38,10 +40,14 @@ static uint_fast64_t atou64(char const **error, char const *numeric) {
 
 int main(int argc, char **argv) {
    char const *error= 0;
-   pearnd_offset po;
-   size_t bytes;
-   if (argc != 4) {
-      error= "Arguments: password, length, offset";
+   /*pearnd_offset po;*/
+   size_t blksz;
+   uint_fast64_t pos;
+   if (argc < 3 || argc > 4) {
+      error=
+         "Arguments: <password> <io_block_size>"
+         " [ <starting_byte_offset> ]"
+      ;
       fail:
       (void)fprintf(
             stderr, "%s failed: %s\n"
@@ -50,21 +56,46 @@ int main(int argc, char **argv) {
       goto cleanup;
    }
    pearnd_init(argv[1], strlen(argv[1]));
+   blksz= (size_t)atou64(&error, argv[2]); if (error) goto fail;
    {
-      uint_fast64_t pos= atou64(&error, argv[3]); if (error) goto fail;
-      pearnd_seek(&po, pos);
+      size_t mask= 512;
+      while (blksz ^ mask) {
+         size_t nmask;
+         if ((nmask= mask + mask) < mask) {
+            error= "I/O block size must be a power of 2 and be >= 512!";
+            goto fail;
+         }
+         mask= nmask;
+      }
    }
-   bytes= (size_t)atou64(&error, argv[2]); if (error) goto fail;
+   if (argc == 4) {
+      pos= atou64(&error, argv[3]); if (error) goto fail;
+      if (pos % blksz) {
+         error= "Starting offset must be a multiple of the I/O block size!";
+         goto fail;
+      }
+      if ((off_t)pos < 0) {
+         error= "Numeric overflow in offset!";
+         goto fail;
+      }
+      if (lseek(1, (off_t)pos, SEEK_SET) == (off_t)-1) {
+         error= "Could not reposition standard output at starting position!";
+         goto fail;
+      }
+   } else {
+      pos= 0;
+   }
+   /*pearnd_seek(&po, pos);
    while (bytes--) {
       uint8_t buf;
       pearnd_generate(&buf, sizeof buf, &po);
-      if (putchar(buf) != buf) {
-         write_error:
-         error= "write error!";
-         goto fail;
-      }
+      if (putchar(buf) != buf) goto write_error;
+   }*/
+   if (fflush(0)) {
+      /*write_error:*/
+      error= "write error!";
+      goto fail;
    }
-   if (fflush(0)) goto write_error;
    cleanup:
    return error ? EXIT_FAILURE : EXIT_SUCCESS;
 }

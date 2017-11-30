@@ -5,6 +5,8 @@
 #include <stdint.h>
 #include <sys/types.h>
 #include <unistd.h>
+
+static int write_mode;
               
 static uint_fast64_t atou64(char const **error, char const *numeric) {
    uint_fast64_t v= 0, nv;
@@ -43,9 +45,10 @@ int main(int argc, char **argv) {
    /*pearnd_offset po;*/
    size_t blksz;
    uint_fast64_t pos;
-   if (argc < 3 || argc > 4) {
+   if (argc < 4 || argc > 5) {
+      bad_arguments:
       error=
-         "Arguments: <password> <io_block_size>"
+         "Arguments: (write | verify) <password> <io_block_size>"
          " [ <starting_byte_offset> ]"
       ;
       fail:
@@ -55,8 +58,11 @@ int main(int argc, char **argv) {
       );
       goto cleanup;
    }
-   pearnd_init(argv[1], strlen(argv[1]));
-   blksz= (size_t)atou64(&error, argv[2]); if (error) goto fail;
+   if (!strcmp(argv[1], "write")) write_mode= 1;
+   else if (!strcmp(argv[1], "verify")) write_mode= 0;
+   else goto bad_arguments;
+   pearnd_init(argv[2], strlen(argv[2]));
+   blksz= (size_t)atou64(&error, argv[3]); if (error) goto fail;
    {
       size_t mask= 512;
       while (blksz ^ mask) {
@@ -68,8 +74,8 @@ int main(int argc, char **argv) {
          mask= nmask;
       }
    }
-   if (argc == 4) {
-      pos= atou64(&error, argv[3]); if (error) goto fail;
+   if (argc == 5) {
+      pos= atou64(&error, argv[4]); if (error) goto fail;
       if (pos % blksz) {
          error= "Starting offset must be a multiple of the I/O block size!";
          goto fail;
@@ -78,8 +84,8 @@ int main(int argc, char **argv) {
          error= "Numeric overflow in offset!";
          goto fail;
       }
-      if (lseek(1, (off_t)pos, SEEK_SET) == (off_t)-1) {
-         error= "Could not reposition standard output at starting position!";
+      if (lseek(write_mode ? 1 : 0, (off_t)pos, SEEK_SET) == (off_t)-1) {
+         error= "Could not reposition standard stream to starting position!";
          goto fail;
       }
    } else {

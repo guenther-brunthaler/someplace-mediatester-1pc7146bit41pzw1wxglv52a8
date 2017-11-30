@@ -1,5 +1,5 @@
 /*
- * #include <dim-sdbrke8ae851uitgzm4nv3ea2.h>
+ * #include <dim_sdbrke8ae851uitgzm4nv3ea2.h>
  *
  *//** @file
  *

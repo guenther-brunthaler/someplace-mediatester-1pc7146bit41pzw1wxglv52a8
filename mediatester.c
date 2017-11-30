@@ -43,7 +43,10 @@ int main(int argc, char **argv) {
    if (argc != 4) {
       error= "Arguments: password, length, offset";
       fail:
-      (void)fprintf(stderr, "%s failed: %s\n", error);
+      (void)fprintf(
+            stderr, "%s failed: %s\n"
+         ,  argc ? argv[0] : "<unnamed program>", error
+      );
       goto cleanup;
    }
    pearnd_init(argv[1], strlen(argv[1]));

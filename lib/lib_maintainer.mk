@@ -11,17 +11,8 @@ scan:
 		printf 'SOURCES = \\\n'; \
 		ls *.c | LC_COLLATE=C sort | { \
 			while IFS= read -r src; do \
-<<<<<<< HEAD:maintainer.mk
-				printf '%s\n' "$$src" >& 8; \
-				tgt=$${src%.*}; \
-				echo "$$tgt: $$tgt.o "'$$(LIBS)'; \
-				echo "$$t"'$$(CC) $$(LDFLAGS) -o $$@' \
-					"$$tgt.o "'$$(LIBS)'; \
-			done 8>& 1 >& 9; \
-=======
 				printf '%s\n' "$$src"; \
 			done; \
->>>>>>> lib:lib/lib_maintainer.mk
 		} | sed "s/^/$$t/; "'s/$$/ \\/'; \
 		echo; \
 	} > sources.mk

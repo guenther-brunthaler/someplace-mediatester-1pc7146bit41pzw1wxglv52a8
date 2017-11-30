@@ -5,8 +5,12 @@
 #include <stdint.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <sys/mman.h>
+
+#define APPROXIMATE_BUFFER_SIZE (16ul << 20)
 
 static int write_mode;
+uint8_t *shared_buffer;
               
 static uint_fast64_t atou64(char const **error, char const *numeric) {
    uint_fast64_t v= 0, nv;
@@ -43,8 +47,9 @@ static uint_fast64_t atou64(char const **error, char const *numeric) {
 int main(int argc, char **argv) {
    char const *error= 0;
    /*pearnd_offset po;*/
-   size_t blksz;
+   size_t blksz, shared_buffer_size;
    uint_fast64_t pos;
+   unsigned cores;
    if (argc < 4 || argc > 5) {
       bad_arguments:
       error=
@@ -91,6 +96,28 @@ int main(int argc, char **argv) {
    } else {
       pos= 0;
    }
+   {
+      long rc;
+      if (
+            (rc= sysconf(_SC_NPROCESSORS_ONLN)) == -1
+         || (cores= (unsigned)rc , (long)cores != rc)
+      ) {
+         error= "Could not determine number of available CPU processors!";
+         goto fail;
+      }
+   }
+   shared_buffer_size= (APPROXIMATE_BUFFER_SIZE + blksz - 1) / blksz * blksz;
+   if (
+      (
+         shared_buffer= mmap(
+               0, shared_buffer_size, PROT_READ | PROT_WRITE
+            ,  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0
+         )
+      ) == MAP_FAILED
+   ) {
+      error= "Could not allocate I/O buffer!";
+      goto fail;
+   }
    /*pearnd_seek(&po, pos);
    while (bytes--) {
       uint8_t buf;
@@ -103,5 +130,10 @@ int main(int argc, char **argv) {
       goto fail;
    }
    cleanup:
+   if (shared_buffer) {
+      void *old= shared_buffer; shared_buffer= 0;
+      if (munmap(old, shared_buffer_size)) {
+      }
+   }
    return error ? EXIT_FAILURE : EXIT_SUCCESS;
 }

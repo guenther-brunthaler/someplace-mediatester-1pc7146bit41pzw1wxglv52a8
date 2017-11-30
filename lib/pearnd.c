@@ -1,9 +1,10 @@
 #include <pearson.h>
 #include <dim-sdbrke8ae851uitgzm4nv3ea2.h>
+#include <stdlib.h>
 #include <inttypes.h>
 #include <assert.h>
 
-#define SWAP(type, v1, v2) { type t= (v1); (v1)= (v2); (t2)= t; }
+#define SWAP(type, v1, v2) { type t= (v1); (v1)= (v2); (v2)= t; }
 
 static uint8_t sbox[1 << 8];
 
@@ -21,9 +22,9 @@ void pearnd_init(void const *key_bytes, size_t count) {
     * 5. Swap s[] values at i and j.
     * 6. Optionally output s[sum of values just swapped]
     * 7. Discard the first 3072 output values ("ARC4-drop3072") */
-   uint8_t
-         const *key= key_bytes
-      ,  const *key_stop= (uint8_t const *)((char *)key_bytes + count)
+   uint8_t const
+         *key= key_bytes
+      ,  *key_stop= (uint8_t const *)((char const *)key_bytes + count)
    ;
    for (i= (unsigned)DIM(sbox); i--; ) sbox[i]= (uint8_t)i;
    for (i= j= k= 0; i < (unsigned)DIM(sbox); ++i) {
@@ -41,19 +42,17 @@ void pearnd_init(void const *key_bytes, size_t count) {
 void pearnd_seek(pearnd_offset *po, uint_fast64_t pos) {
    unsigned i= 0;
    do {
-      assert(i < DIM(po->pos);
+      assert(i < DIM(po->pos));
       po->pos[i++]= pos & UINT8_C(0xff);
    } while (pos>>= 8);
-   assert(i <= DIM(po->pos);
+   assert(i <= DIM(po->pos));
    po->limbs= i;
 }
 
 void pearnd_generate(void *dst, size_t count, pearnd_offset *po) {
-   uint8_t
-         const *out= dst
-      ,  const *out_stop= (uint8_t const *)((char *)dst + count)
-      ,  *pos= po->pos, mac
-   ;
+   uint8_t *out= dst;
+   uint8_t const *out_stop= (uint8_t const *)((char *)dst + count);
+   uint8_t *pos= po->pos, mac;
    unsigned i, limbs= po->limbs, carry;
    assert(limbs >= 1);
    while (out != out_stop) {

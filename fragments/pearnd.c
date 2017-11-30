@@ -53,13 +53,13 @@ void pearnd_generate(void *dst, size_t count, pearnd_offset *po) {
    uint8_t *out= dst;
    uint8_t const *out_stop= (uint8_t const *)((char *)dst + count);
    uint8_t *pos= po->pos, mac;
-   unsigned i, limbs= po->limbs, carry;
+   unsigned i, limbs= po->limbs, sum;
    assert(limbs >= 1);
    while (out != out_stop) {
       i= 0; mac= UINT8_C(0);
       do mac= sbox[mac ^ pos[i]]; while (++i != limbs);
       *out++= mac;
-      for (i= 0; ++pos[i] == 1 << 8; ) {
+      for (i= 0; pos[i]= (uint8_t)(sum= pos[i] + 1u) , sum == 1u << 8; ) {
          pos[i]= 0;
          if (++i == limbs) {
             pos[i]= 0;

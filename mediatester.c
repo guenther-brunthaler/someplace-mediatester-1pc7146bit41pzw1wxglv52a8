@@ -52,7 +52,7 @@ int main(int argc, char **argv) {
    pearnd_init(argv[1], strlen(argv[1]));
    {
       uint_fast64_t pos= atou64(&error, argv[3]); if (error) goto fail;
-      pearnd_seek(&po, bytes);
+      pearnd_seek(&po, pos);
    }
    bytes= (size_t)atou64(&error, argv[2]); if (error) goto fail;
    while (bytes--) {

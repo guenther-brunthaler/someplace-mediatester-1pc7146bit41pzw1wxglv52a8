@@ -6,11 +6,15 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include <sys/mman.h>
+#include <errno.h>
 
 #define APPROXIMATE_BUFFER_SIZE (16ul << 20)
 
 static int write_mode;
-uint8_t *shared_buffer;
+static uint8_t *shared_buffer;
+static uint8_t const *shared_buffer_stop;
+static size_t blksz;
+uint_fast64_t pos;
               
 static uint_fast64_t atou64(char const **error, char const *numeric) {
    uint_fast64_t v= 0, nv;
@@ -46,10 +50,9 @@ static uint_fast64_t atou64(char const **error, char const *numeric) {
 
 int main(int argc, char **argv) {
    char const *error= 0;
-   /*pearnd_offset po;*/
-   size_t blksz, shared_buffer_size;
-   uint_fast64_t pos;
-   unsigned cores;
+   pearnd_offset po;
+   size_t shared_buffer_size;
+   unsigned threads;
    if (argc < 4 || argc > 5) {
       bad_arguments:
       error=
@@ -66,6 +69,10 @@ int main(int argc, char **argv) {
    if (!strcmp(argv[1], "write")) write_mode= 1;
    else if (!strcmp(argv[1], "verify")) write_mode= 0;
    else goto bad_arguments;
+   if (!*argv[2]) {
+      error= "Key must not be empty!";
+      goto fail;
+   }
    pearnd_init(argv[2], strlen(argv[2]));
    blksz= (size_t)atou64(&error, argv[3]); if (error) goto fail;
    {
@@ -100,12 +107,13 @@ int main(int argc, char **argv) {
       long rc;
       if (
             (rc= sysconf(_SC_NPROCESSORS_ONLN)) == -1
-         || (cores= (unsigned)rc , (long)cores != rc)
+         || (threads= (unsigned)rc , (long)threads != rc)
       ) {
          error= "Could not determine number of available CPU processors!";
          goto fail;
       }
    }
+   ++threads; /* Create one thread more than processors just for safety. */
    shared_buffer_size= (APPROXIMATE_BUFFER_SIZE + blksz - 1) / blksz * blksz;
    if (
       (
@@ -118,14 +126,30 @@ int main(int argc, char **argv) {
       error= "Could not allocate I/O buffer!";
       goto fail;
    }
-   /*pearnd_seek(&po, pos);
-   while (bytes--) {
-      uint8_t buf;
-      pearnd_generate(&buf, sizeof buf, &po);
-      if (putchar(buf) != buf) goto write_error;
-   }*/
+   shared_buffer_stop= shared_buffer + shared_buffer_size;
+   pearnd_seek(&po, pos);
+   if (!write_mode) {
+      error= "Verify mode is not yet implemented!";
+      goto fail;
+   }
+   for (;;) {
+      ssize_t written;
+      uint8_t const *out;
+      size_t left;
+      pearnd_generate(shared_buffer, left= shared_buffer_size, &po);
+      out= shared_buffer;
+      if ((written= write(1, out, left)) <= 0) {
+         if (written == 0) break;
+         if (written != -1) goto exotic_error;
+         if (errno != EINTR) goto write_error;
+         written= 0;
+      }
+      if ((size_t)written > left) goto exotic_error;
+      out+= (size_t)written;
+      left-= (size_t)written;
+   }
    if (fflush(0)) {
-      /*write_error:*/
+      write_error:
       error= "write error!";
       goto fail;
    }
@@ -133,6 +157,9 @@ int main(int argc, char **argv) {
    if (shared_buffer) {
       void *old= shared_buffer; shared_buffer= 0;
       if (munmap(old, shared_buffer_size)) {
+         exotic_error:
+         error= "Internal error (this should normally never happen).\n";
+         goto fail;
       }
    }
    return error ? EXIT_FAILURE : EXIT_SUCCESS;

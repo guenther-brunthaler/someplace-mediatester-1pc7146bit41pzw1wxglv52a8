@@ -20,7 +20,7 @@ static size_t blksz= 4096;
 static size_t work_segments= 64;
 static size_t work_segment_sz;
 static uint_fast64_t pos;
-static unsigned active_prng_threads;
+static unsigned active_threads /* = 0; */;
 static pthread_mutex_t workers_mutex= PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t io_mutex= PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t workers_wakeup_call= PTHREAD_COND_INITIALIZER;
@@ -28,7 +28,7 @@ static pthread_cond_t workers_wakeup_call= PTHREAD_COND_INITIALIZER;
 #define CEIL_DIV(num, den) (((num) + (den) - 1) / (den))
 
 static void *thread_func(void *dummy) {
-   char const *error;
+   char const *error= 0;
    struct {
       unsigned wmtx: 1;
    } have= {0};
@@ -36,9 +36,7 @@ static void *thread_func(void *dummy) {
    if (pthread_mutex_lock(&workers_mutex)) {
       lock_error:
       error= "Could not lock mutex!";
-      fail:
-      (void)fprintf(stderr, "Failure in thread: %s\n", error);
-      goto cleanup;
+      goto fail;
    }
    have.wmtx= 1;
    sweet_slumber:
@@ -49,7 +47,7 @@ static void *thread_func(void *dummy) {
    check_for_work:
    if (shared_buffer == shared_buffer_stop) {
       /* All worker segments have already been assigned to some thread. */
-      if (active_prng_threads == 0) {
+      if (active_threads == 0) {
          /* And all the worker threads have finished! Let's do I/O then. */
          for (;;) {
             ssize_t written;
@@ -69,7 +67,7 @@ static void *thread_func(void *dummy) {
       } else {
          /* We have nothing to do, but other worker threads are still active.
           * Just wait until there is again something to do. */
-         --active_prng_threads;
+         --active_threads;
          goto sweet_slumber;
       }
    } else {
@@ -88,7 +86,7 @@ static void *thread_func(void *dummy) {
       if (pthread_mutex_lock(&workers_mutex)) goto lock_error;
       goto check_for_work;
    }
-   cleanup:
+   fail:
    if (have.wmtx) {
       have.wmtx= 0;
       if (pthread_mutex_unlock(&workers_mutex)) {
@@ -97,7 +95,7 @@ static void *thread_func(void *dummy) {
          goto fail;
       }
    }
-   return 0;
+   return error;
 }
               
 static uint_fast64_t atou64(char const **error, char const *numeric) {
@@ -193,6 +191,10 @@ int main(int argc, char **argv) {
    } else {
       work_segments= threads;
    }
+   /* Most threads will generate PRNG data. Another one does I/O and switches
+    * working buffers when the next buffer is ready. The main program thread
+    * only waits for termination of the other threads. */
+   ++threads;
    work_segment_sz= CEIL_DIV(APPROXIMATE_BUFFER_SIZE, work_segments);
    work_segment_sz= CEIL_DIV(work_segment_sz, blksz) * blksz;
    shared_buffer_size= work_segment_sz * work_segments;
@@ -208,7 +210,7 @@ int main(int argc, char **argv) {
             "number of such buffers: %u\n"
          ,  pos
          ,  (unsigned)blksz
-         ,  threads
+         ,  threads - 1
          ,  (unsigned long)work_segment_sz
          ,  (unsigned long)work_segments
          ,  (unsigned long)shared_buffer_size
@@ -217,9 +219,6 @@ int main(int argc, char **argv) {
    ) {
       goto write_error;
    }
-   /* The threads will encrypt/decrypt. An additional thread does I/O. The
-    * main program thread only waits for termination of the other threads. */
-   active_prng_threads= threads++;
    {
       unsigned i;
       for (i= (unsigned)DIM(shared_buffers); i--; ) {
@@ -273,9 +272,22 @@ int main(int argc, char **argv) {
       for (i= threads; i--; ) {
          if (tvalid[i]) {
             tvalid[i]= 0;
-            if (pthread_join(tid[i], 0)) {
-               error= "Failure waiting for child thread to terminate!";
-               goto fail;
+            if (error) {
+               if (pthread_cancel(tid[i])) {
+                  error= "Could not terminate child thread!\n";
+                  goto fail;
+               }
+            }
+            {
+               void *thread_error;
+               if (pthread_join(tid[i], &thread_error)) {
+                  error= "Failure waiting for child thread to terminate!";
+                  goto fail;
+               }
+               if (thread_error && thread_error != PTHREAD_CANCELED) {
+                  error= thread_error;
+                  goto fail;
+               }
             }
          }
       }

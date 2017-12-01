@@ -152,6 +152,7 @@ int main(int argc, char **argv) {
       unsigned workers_mutex: 1;
       unsigned io_mutex: 1;
       unsigned workers_wakeup_call: 1;
+      unsigned failure: 1;
    } have= {0};
    /* Preset global variables for interthread communication. */
    tgs.blksz= 4096;
@@ -165,25 +166,21 @@ int main(int argc, char **argv) {
    /* Process arguments. */
    if (argc < 3 || argc > 4) {
       bad_arguments:
-      error=
+      ERROR(
          "Arguments: (write | verify) <password> [ <starting_byte_offset> ]"
-      ;
+      );
    }
    if (!strcmp(argv[1], "write")) tgs.write_mode= 1;
    else if (!strcmp(argv[1], "verify")) tgs.write_mode= 0;
    else goto bad_arguments;
-   if (!*argv[2]) {
-      ERROR("Key must not be empty!");
-   }
+   if (!*argv[2]) ERROR("Key must not be empty!");
    pearnd_init(argv[2], strlen(argv[2]));
    if (argc == 4) {
       tgs.pos= atou64(&error, argv[3]); if (error) goto fail;
       if (tgs.pos % tgs.blksz) {
          ERROR("Starting offset must be a multiple of the I/O block size!");
       }
-      if ((off_t)tgs.pos < 0) {
-         ERROR("Numeric overflow in offset!");
-      }
+      if ((off_t)tgs.pos < 0) ERROR("Numeric overflow in offset!");
       if (
          lseek(tgs.write_mode ? 1 : 0, (off_t)tgs.pos, SEEK_SET) == (off_t)-1
       ) {
@@ -255,9 +252,7 @@ int main(int argc, char **argv) {
       tgs.shared_buffer= tgs.shared_buffers[0] + shared_buffer_size
    ;
    pearnd_seek(&po, tgs.pos);
-   if (!tgs.write_mode) {
-      ERROR("Verify mode is not yet implemented!");
-   }
+   if (!tgs.write_mode) ERROR("Verify mode is not yet implemented!");
    if (!(tid= calloc(threads, sizeof *tid))) {
       malloc_error:
       ERROR("Memory allocation failure!");
@@ -274,16 +269,15 @@ int main(int argc, char **argv) {
          tvalid[i]= 1;
       }
    }
-   if (fflush(0)) {
-      write_error:
-      ERROR(write_error_msg);
-   }
+   if (fflush(0)) write_error: ERROR(write_error_msg);
    goto cleanup;
    fail:
+   have.failure= 1;
    (void)fprintf(
          stderr, "%s failed: %s\n"
       ,  argc ? argv[0] : "<unnamed program>", error
    );
+   error= 0;
    cleanup:
    if (have.tvalid) {
       unsigned i;
@@ -335,5 +329,5 @@ int main(int argc, char **argv) {
       have.workers_wakeup_call= 0;
       if (pthread_cond_destroy(&tgs.workers_wakeup_call)) goto unlikely_error;
    }
-   return error ? EXIT_FAILURE : EXIT_SUCCESS;
+   return have.failure ? EXIT_FAILURE : EXIT_SUCCESS;
 }

@@ -1,3 +1,17 @@
+/* Media tester
+ *
+ * Fills a block device or data stream with reprocucible pseudorandom bytes or
+ * reads such a block device or data stream to verify the same pseudorandom
+ * bytes written before are still present. Both write and verification mode
+ * try to make use of the available CPU cores to create the pseudorandom data
+ * data as quickly as possible in parallel, and double buffering is employed
+ * to allow disk I/O to run (mostly) in parallel, too.
+ *
+ * Copyright (c) 2017 Guenther Brunthaler. All rights reserved.
+ *
+ * This source file is free software.
+ * Distribution is permitted under the terms of the GPLv3.  */
+
 #include <dim_sdbrke8ae851uitgzm4nv3ea2.h>
 #include <pearson.h>
 #include <stdio.h>

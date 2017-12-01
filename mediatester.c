@@ -29,7 +29,7 @@ static struct {
 
 #define CEIL_DIV(num, den) (((num) + (den) - 1) / (den))
 
-#define ERROR(msg) { if (!error) error= msg; goto fail; }
+#define ERROR(msg) { error= msg; goto fail; }
 
 static char const exotic_error_msg[]= {
    "Internal error! (This should normally never happen.)"
@@ -113,8 +113,7 @@ static uint_fast64_t atou64(char const **error, char const *numeric) {
    for (i= 0; ; ++i) {
       #define error *error
          switch (numeric[i]) {
-            default:
-               ERROR("Invalid decimal digit!");
+            default: ERROR("Invalid decimal digit!");
             case '\0':
                if (i) return v;
                ERROR("Decimal number without any digits!");
@@ -129,9 +128,7 @@ static uint_fast64_t atou64(char const **error, char const *numeric) {
             case '8': digit= 8; break;
             case '9': digit= 9;
          }
-         if ((nv= v * 10 + digit) < v) {
-            ERROR("Decimal number is too large!");
-         }
+         if ((nv= v * 10 + digit) < v) ERROR("Decimal number is too large!");
       #undef error
       v= nv;
    }

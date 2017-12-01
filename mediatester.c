@@ -34,20 +34,65 @@ static void *thread_func(void *dummy) {
    } have= {0};
    (void)dummy;
    if (pthread_mutex_lock(&workers_mutex)) {
+      lock_error:
       error= "Could not lock mutex!";
       fail:
       (void)fprintf(stderr, "Failure in thread: %s\n", error);
       goto cleanup;
    }
    have.wmtx= 1;
+   sweet_slumber:
    if (pthread_cond_wait(&workers_wakeup_call, &workers_mutex)) {
       error= "Could not wait for condition variable!";
       goto fail;
+   }
+   check_for_work:
+   if (shared_buffer == shared_buffer_stop) {
+      /* All worker segments have already been assigned to some thread. */
+      if (active_prng_threads == 0) {
+         /* And all the worker threads have finished! Let's do I/O then. */
+         for (;;) {
+            ssize_t written;
+            uint8_t const *out;
+            size_t left;
+            out= work_segment;
+            if ((written= write(1, out, left)) <= 0) {
+               if (written == 0) break;
+               if (written != -1) goto exotic_error;
+               if (errno != EINTR) goto write_error;
+               written= 0;
+            }
+            if ((size_t)written > left) goto exotic_error;
+            out+= (size_t)written;
+            left-= (size_t)written;
+         }
+      } else {
+         /* We have nothing to do, but other worker threads are still active.
+          * Just wait until there is again something to do. */
+         --active_prng_threads;
+         goto sweet_slumber;
+      }
+   } else {
+      /* There is more work to do. Seize the next work segment. */
+      pearnd_offset po;
+      uint8_t *work_segment= shared_buffer;
+      shared_buffer+= work_segment_sz;
+      pearnd_seek(&po, pos);
+      pos+= work_segment_sz;
+      /* Allow other threads to seize work segments as well. */
+      have.wmtx= 0;
+      if (pthread_mutex_unlock(&workers_mutex)) goto unlock_error;
+      /* Do every worker thread's primary job: Process its work segment. */
+      pearnd_generate(work_segment, work_segment_size, &po);
+      /* See whether we can get the next job. */
+      if (pthread_mutex_lock(&workers_mutex)) goto lock_error;
+      goto check_for_work;
    }
    cleanup:
    if (have.wmtx) {
       have.wmtx= 0;
       if (pthread_mutex_unlock(&workers_mutex)) {
+         unlock_error:
          error= "Could not unlock mutex!";
          goto fail;
       }
@@ -174,7 +219,7 @@ int main(int argc, char **argv) {
    }
    /* The threads will encrypt/decrypt. An additional thread does I/O. The
     * main program thread only waits for termination of the other threads. */
-   ++threads;
+   active_prng_threads= threads++;
    {
       unsigned i;
       for (i= (unsigned)DIM(shared_buffers); i--; ) {
@@ -216,22 +261,6 @@ int main(int argc, char **argv) {
    if (pthread_cond_broadcast(&workers_wakeup_call)) {
       error= "Could not wake up worker threads!";
       goto fail;
-   }
-   for (;;) {
-      ssize_t written;
-      uint8_t const *out;
-      size_t left;
-      pearnd_generate(shared_buffer, left= shared_buffer_size, &po);
-      out= shared_buffer;
-      if ((written= write(1, out, left)) <= 0) {
-         if (written == 0) break;
-         if (written != -1) goto exotic_error;
-         if (errno != EINTR) goto write_error;
-         written= 0;
-      }
-      if ((size_t)written > left) goto exotic_error;
-      out+= (size_t)written;
-      left-= (size_t)written;
    }
    if (fflush(0)) {
       write_error:

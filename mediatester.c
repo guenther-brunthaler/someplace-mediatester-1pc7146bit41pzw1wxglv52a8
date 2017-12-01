@@ -153,8 +153,8 @@ int main(int argc, char **argv) {
    pearnd_offset po;
    size_t shared_buffer_size;
    unsigned threads;
-   pthread_t *tid= 0;
-   char *tvalid= 0;
+   pthread_t *tid;
+   char *tvalid;
    struct {
       unsigned tvalid: 1;
       unsigned tid: 1;
@@ -281,12 +281,14 @@ int main(int argc, char **argv) {
       error= "Verify mode is not yet implemented!";
       goto fail;
    }
-   if (!(tvalid= calloc(threads, sizeof *tvalid))) {
+   if (!(tid= calloc(threads, sizeof *tid))) {
       malloc_error:
       error= "Memory allocation failure!";
       goto fail;
    }
-   if (!(tid= calloc(threads, sizeof *tid))) goto malloc_error;
+   have.tid= 1;
+   if (!(tvalid= calloc(threads, sizeof *tvalid))) goto malloc_error;
+   have.tvalid= 1;
    {
       unsigned i;
       for (i= threads; i--; ) {
@@ -303,7 +305,7 @@ int main(int argc, char **argv) {
       goto fail;
    }
    cleanup:
-   if (tvalid) {
+   if (have.tvalid) {
       unsigned i;
       for (i= threads; i--; ) {
          if (tvalid[i]) {
@@ -327,8 +329,10 @@ int main(int argc, char **argv) {
             }
          }
       }
-      free(tid);
-      free(tvalid); tvalid= 0;
+      have.tvalid= 0; free(tvalid);
+   }
+   if (have.tid) {
+      have.tid= 0; free(tid);
    }
    {
       unsigned i;

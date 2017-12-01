@@ -13,89 +13,107 @@
 /* TWO such buffers will be allocated. */
 #define APPROXIMATE_BUFFER_SIZE (16ul << 20)
 
-static int write_mode;
-static uint8_t *shared_buffer, *shared_buffers[2];
-static uint8_t const *shared_buffer_stop;
-static size_t blksz= 4096;
-static size_t work_segments= 64;
-static size_t work_segment_sz;
-static uint_fast64_t pos;
-static unsigned active_threads /* = 0; */;
-static pthread_mutex_t workers_mutex= PTHREAD_MUTEX_INITIALIZER;
-static pthread_mutex_t io_mutex= PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t workers_wakeup_call= PTHREAD_COND_INITIALIZER;
+static struct {
+   int write_mode;
+   uint8_t *shared_buffer, *shared_buffers[2];
+   uint8_t const *shared_buffer_stop;
+   size_t blksz;
+   size_t work_segments;
+   size_t work_segment_sz;
+   uint_fast64_t pos;
+   unsigned active_threads /* = 0; */;
+   pthread_mutex_t workers_mutex;
+   pthread_mutex_t io_mutex;
+   pthread_cond_t workers_wakeup_call;
+} tgs; /* Thread global storage */
 
 #define CEIL_DIV(num, den) (((num) + (den) - 1) / (den))
 
-static void *thread_func(void *dummy) {
+static char const exotic_error_msg[]= {
+   "Internal error! (This should normally never happen.)"
+};
+
+static char const write_error_msg[]= {"Write error!"};
+
+/* We *could* pass &tgs as a paramater, but there is no point because there
+ * exists only one such instance anyway. Also, accessing global variables is
+ * typically faster. */
+static void *thread_func(void *unused_dummy) {
    char const *error= 0;
-   struct {
-      unsigned wmtx: 1;
-   } have= {0};
-   (void)dummy;
-   if (pthread_mutex_lock(&workers_mutex)) {
+   struct { unsigned workers_mutex_procured; } have= {0};
+   (void)unused_dummy;
+   if (pthread_mutex_lock(&tgs.workers_mutex)) {
       lock_error:
       error= "Could not lock mutex!";
       goto fail;
    }
-   have.wmtx= 1;
-   sweet_slumber:
-   if (pthread_cond_wait(&workers_wakeup_call, &workers_mutex)) {
-      error= "Could not wait for condition variable!";
-      goto fail;
-   }
+   have.workers_mutex_procured= 1;
    check_for_work:
-   if (shared_buffer == shared_buffer_stop) {
+   if (tgs.shared_buffer == tgs.shared_buffer_stop) {
       /* All worker segments have already been assigned to some thread. */
-      if (active_threads == 0) {
+      if (tgs.active_threads == 0) {
          /* And all the worker threads have finished! Let's do I/O then. */
          for (;;) {
             ssize_t written;
             uint8_t const *out;
             size_t left;
-            out= work_segment;
+            out= tgs.shared_buffer;
             if ((written= write(1, out, left)) <= 0) {
                if (written == 0) break;
-               if (written != -1) goto exotic_error;
-               if (errno != EINTR) goto write_error;
+               if (written != -1) {
+                  unlikely_error:
+                  error= exotic_error_msg;
+                  goto fail;
+               }
+               if (errno != EINTR) {
+                  error= write_error_msg;
+                  goto fail;
+               }
                written= 0;
             }
-            if ((size_t)written > left) goto exotic_error;
+            if ((size_t)written > left) goto unlikely_error;
             out+= (size_t)written;
             left-= (size_t)written;
          }
+         if (pthread_cond_broadcast(&tgs.workers_wakeup_call)) {
+            error= "Could not wake up worker threads!";
+            goto fail;
+         }
       } else {
          /* We have nothing to do, but other worker threads are still active.
-          * Just wait until there is again something to do. */
-         --active_threads;
-         goto sweet_slumber;
+          * Just wait until there is again possibly something to do. */
+         --tgs.active_threads;
+         if (pthread_cond_wait(&tgs.workers_wakeup_call, &tgs.workers_mutex)) {
+            error= "Could not wait for condition variable!";
+            goto fail;
+         }
       }
    } else {
       /* There is more work to do. Seize the next work segment. */
       pearnd_offset po;
-      uint8_t *work_segment= shared_buffer;
-      shared_buffer+= work_segment_sz;
-      pearnd_seek(&po, pos);
-      pos+= work_segment_sz;
+      uint8_t *work_segment= tgs.shared_buffer;
+      tgs.shared_buffer+= tgs.work_segment_sz;
+      pearnd_seek(&po, tgs.pos);
+      tgs.pos+= tgs.work_segment_sz;
       /* Allow other threads to seize work segments as well. */
-      have.wmtx= 0;
-      if (pthread_mutex_unlock(&workers_mutex)) goto unlock_error;
+      have.workers_mutex_procured= 0;
+      if (pthread_mutex_unlock(&tgs.workers_mutex)) goto unlock_error;
       /* Do every worker thread's primary job: Process its work segment. */
-      pearnd_generate(work_segment, work_segment_size, &po);
+      pearnd_generate(work_segment, tgs.work_segment_sz, &po);
       /* See whether we can get the next job. */
-      if (pthread_mutex_lock(&workers_mutex)) goto lock_error;
+      if (pthread_mutex_lock(&tgs.workers_mutex)) goto lock_error;
       goto check_for_work;
    }
    fail:
-   if (have.wmtx) {
-      have.wmtx= 0;
-      if (pthread_mutex_unlock(&workers_mutex)) {
+   if (have.workers_mutex_procured) {
+      have.workers_mutex_procured= 0;
+      if (pthread_mutex_unlock(&tgs.workers_mutex)) {
          unlock_error:
          error= "Could not unlock mutex!";
          goto fail;
       }
    }
-   return error;
+   return (void *)error;
 }
               
 static uint_fast64_t atou64(char const **error, char const *numeric) {
@@ -137,6 +155,23 @@ int main(int argc, char **argv) {
    unsigned threads;
    pthread_t *tid= 0;
    char *tvalid= 0;
+   struct {
+      unsigned tvalid: 1;
+      unsigned tid: 1;
+      unsigned workers_mutex: 1;
+      unsigned io_mutex: 1;
+      unsigned workers_wakeup_call: 1;
+   } have= {0};
+   /* Preset global variables for interthread communication. */
+   tgs.blksz= 4096;
+   tgs.work_segments= 64;
+   if (pthread_mutex_init(&tgs.workers_mutex, 0)) goto unlikely_error;
+   have.workers_mutex= 1;
+   if (pthread_mutex_init(&tgs.io_mutex, 0)) goto unlikely_error;
+   have.io_mutex= 1;
+   if (pthread_cond_init(&tgs.workers_wakeup_call, 0)) goto unlikely_error;
+   have.workers_wakeup_call= 1;
+   /* Process arguments. */
    if (argc < 3 || argc > 4) {
       bad_arguments:
       error=
@@ -149,30 +184,33 @@ int main(int argc, char **argv) {
       );
       goto cleanup;
    }
-   if (!strcmp(argv[1], "write")) write_mode= 1;
-   else if (!strcmp(argv[1], "verify")) write_mode= 0;
+   if (!strcmp(argv[1], "write")) tgs.write_mode= 1;
+   else if (!strcmp(argv[1], "verify")) tgs.write_mode= 0;
    else goto bad_arguments;
    if (!*argv[2]) {
       error= "Key must not be empty!";
       goto fail;
    }
    pearnd_init(argv[2], strlen(argv[2]));
+   /* */
    if (argc == 4) {
-      pos= atou64(&error, argv[3]); if (error) goto fail;
-      if (pos % blksz) {
+      tgs.pos= atou64(&error, argv[3]); if (error) goto fail;
+      if (tgs.pos % tgs.blksz) {
          error= "Starting offset must be a multiple of the I/O block size!";
          goto fail;
       }
-      if ((off_t)pos < 0) {
+      if ((off_t)tgs.pos < 0) {
          error= "Numeric overflow in offset!";
          goto fail;
       }
-      if (lseek(write_mode ? 1 : 0, (off_t)pos, SEEK_SET) == (off_t)-1) {
+      if (
+         lseek(tgs.write_mode ? 1 : 0, (off_t)tgs.pos, SEEK_SET) == (off_t)-1
+      ) {
          error= "Could not reposition standard stream to starting position!";
          goto fail;
       }
    } else {
-      pos= 0;
+      tgs.pos= 0;
    }
    {
       long rc;
@@ -184,20 +222,20 @@ int main(int argc, char **argv) {
          goto fail;
       }
    }
-   if (threads < work_segments) {
-      if (threads == 1) work_segments= 1;
-      work_segments= work_segments / threads * threads;
-      assert(work_segments >= 1);
+   if (threads < tgs.work_segments) {
+      if (threads == 1) tgs.work_segments= 1;
+      tgs.work_segments= tgs.work_segments / threads * threads;
+      assert(tgs.work_segments >= 1);
    } else {
-      work_segments= threads;
+      tgs.work_segments= threads;
    }
    /* Most threads will generate PRNG data. Another one does I/O and switches
     * working buffers when the next buffer is ready. The main program thread
     * only waits for termination of the other threads. */
    ++threads;
-   work_segment_sz= CEIL_DIV(APPROXIMATE_BUFFER_SIZE, work_segments);
-   work_segment_sz= CEIL_DIV(work_segment_sz, blksz) * blksz;
-   shared_buffer_size= work_segment_sz * work_segments;
+   tgs.work_segment_sz= CEIL_DIV(APPROXIMATE_BUFFER_SIZE, tgs.work_segments);
+   tgs.work_segment_sz= CEIL_DIV(tgs.work_segment_sz, tgs.blksz) * tgs.blksz;
+   shared_buffer_size= tgs.work_segment_sz * tgs.work_segments;
    if (
       fprintf(
             stderr
@@ -208,23 +246,23 @@ int main(int argc, char **argv) {
             "number of worker segments: %lu\n"
             "size of buffer subdivided into worker segments: %lu bytes\n"
             "number of such buffers: %u\n"
-         ,  pos
-         ,  (unsigned)blksz
+         ,  tgs.pos
+         ,  (unsigned)tgs.blksz
          ,  threads - 1
-         ,  (unsigned long)work_segment_sz
-         ,  (unsigned long)work_segments
+         ,  (unsigned long)tgs.work_segment_sz
+         ,  (unsigned long)tgs.work_segments
          ,  (unsigned long)shared_buffer_size
-         ,  (unsigned)DIM(shared_buffers)
+         ,  (unsigned)DIM(tgs.shared_buffers)
       ) <= 0
    ) {
       goto write_error;
    }
    {
       unsigned i;
-      for (i= (unsigned)DIM(shared_buffers); i--; ) {
+      for (i= (unsigned)DIM(tgs.shared_buffers); i--; ) {
          if (
             (
-               shared_buffers[i]= mmap(
+               tgs.shared_buffers[i]= mmap(
                      0, shared_buffer_size, PROT_READ | PROT_WRITE
                   ,  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0
                )
@@ -235,9 +273,11 @@ int main(int argc, char **argv) {
          }
       }
    }
-   shared_buffer_stop= shared_buffer= shared_buffers[0] + shared_buffer_size;
-   pearnd_seek(&po, pos);
-   if (!write_mode) {
+   tgs.shared_buffer_stop=
+      tgs.shared_buffer= tgs.shared_buffers[0] + shared_buffer_size
+   ;
+   pearnd_seek(&po, tgs.pos);
+   if (!tgs.write_mode) {
       error= "Verify mode is not yet implemented!";
       goto fail;
    }
@@ -257,13 +297,9 @@ int main(int argc, char **argv) {
          tvalid[i]= 1;
       }
    }
-   if (pthread_cond_broadcast(&workers_wakeup_call)) {
-      error= "Could not wake up worker threads!";
-      goto fail;
-   }
    if (fflush(0)) {
       write_error:
-      error= "write error!";
+      error= write_error_msg;
       goto fail;
    }
    cleanup:
@@ -296,16 +332,28 @@ int main(int argc, char **argv) {
    }
    {
       unsigned i;
-      for (i= (unsigned)DIM(shared_buffers); i--; ) {
-         if (shared_buffers[i]) {
-            void *old= shared_buffers[i]; shared_buffers[i]= 0;
+      for (i= (unsigned)DIM(tgs.shared_buffers); i--; ) {
+         if (tgs.shared_buffers[i]) {
+            void *old= tgs.shared_buffers[i]; tgs.shared_buffers[i]= 0;
             if (munmap(old, shared_buffer_size)) {
-               exotic_error:
-               error= "Internal error (this should normally never happen).\n";
+               unlikely_error:
+               error= exotic_error_msg;
                goto fail;
             }
          }
       }
+   }
+   if (have.workers_mutex) {
+      have.workers_mutex= 0;
+      if (pthread_mutex_destroy(&tgs.workers_mutex)) goto unlikely_error;
+   }
+   if (have.io_mutex) {
+      have.io_mutex= 0;
+      if (pthread_mutex_destroy(&tgs.io_mutex)) goto unlikely_error;
+   }
+   if (have.workers_wakeup_call) {
+      have.workers_wakeup_call= 0;
+      if (pthread_cond_destroy(&tgs.workers_wakeup_call)) goto unlikely_error;
    }
    return error ? EXIT_FAILURE : EXIT_SUCCESS;
 }

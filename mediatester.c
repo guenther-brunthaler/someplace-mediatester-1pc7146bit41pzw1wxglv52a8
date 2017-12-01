@@ -29,6 +29,8 @@ static struct {
 
 #define CEIL_DIV(num, den) (((num) + (den) - 1) / (den))
 
+#define ERROR(msg) { if (!error) error= msg; goto fail; }
+
 static char const exotic_error_msg[]= {
    "Internal error! (This should normally never happen.)"
 };
@@ -44,8 +46,7 @@ static void *thread_func(void *unused_dummy) {
    (void)unused_dummy;
    if (pthread_mutex_lock(&tgs.workers_mutex)) {
       lock_error:
-      error= "Could not lock mutex!";
-      goto fail;
+      ERROR("Could not lock mutex!");
    }
    have.workers_mutex_procured= 1;
    check_for_work:
@@ -60,15 +61,8 @@ static void *thread_func(void *unused_dummy) {
             out= tgs.shared_buffer;
             if ((written= write(1, out, left)) <= 0) {
                if (written == 0) break;
-               if (written != -1) {
-                  unlikely_error:
-                  error= exotic_error_msg;
-                  goto fail;
-               }
-               if (errno != EINTR) {
-                  error= write_error_msg;
-                  goto fail;
-               }
+               if (written != -1) unlikely_error: ERROR(exotic_error_msg);
+               if (errno != EINTR) ERROR(write_error_msg);
                written= 0;
             }
             if ((size_t)written > left) goto unlikely_error;
@@ -76,16 +70,14 @@ static void *thread_func(void *unused_dummy) {
             left-= (size_t)written;
          }
          if (pthread_cond_broadcast(&tgs.workers_wakeup_call)) {
-            error= "Could not wake up worker threads!";
-            goto fail;
+            ERROR("Could not wake up worker threads!");
          }
       } else {
          /* We have nothing to do, but other worker threads are still active.
           * Just wait until there is again possibly something to do. */
          --tgs.active_threads;
          if (pthread_cond_wait(&tgs.workers_wakeup_call, &tgs.workers_mutex)) {
-            error= "Could not wait for condition variable!";
-            goto fail;
+            ERROR("Could not wait for condition variable!");
          }
       }
    } else {
@@ -109,8 +101,7 @@ static void *thread_func(void *unused_dummy) {
       have.workers_mutex_procured= 0;
       if (pthread_mutex_unlock(&tgs.workers_mutex)) {
          unlock_error:
-         error= "Could not unlock mutex!";
-         goto fail;
+         ERROR("Could not unlock mutex!");
       }
    }
    return (void *)error;
@@ -120,32 +111,32 @@ static uint_fast64_t atou64(char const **error, char const *numeric) {
    uint_fast64_t v= 0, nv;
    unsigned digit, i;
    for (i= 0; ; ++i) {
-      switch (numeric[i]) {
-         default:
-            *error= "Invalid decimal digit!";
-            fail:
-            return 0;
-         case '\0':
-            if (i) return v;
-            *error= "Decimal number without any digits!";
-            goto fail;
-         case '0': digit= 0; break;
-         case '1': digit= 1; break;
-         case '2': digit= 2; break;
-         case '3': digit= 3; break;
-         case '4': digit= 4; break;
-         case '5': digit= 5; break;
-         case '6': digit= 6; break;
-         case '7': digit= 7; break;
-         case '8': digit= 8; break;
-         case '9': digit= 9;
-      }
-      if ((nv= v * 10 + digit) < v) {
-         *error= "Decimal number is too large!";
-         goto fail;
-      }
+      #define error *error
+         switch (numeric[i]) {
+            default:
+               ERROR("Invalid decimal digit!");
+            case '\0':
+               if (i) return v;
+               ERROR("Decimal number without any digits!");
+            case '0': digit= 0; break;
+            case '1': digit= 1; break;
+            case '2': digit= 2; break;
+            case '3': digit= 3; break;
+            case '4': digit= 4; break;
+            case '5': digit= 5; break;
+            case '6': digit= 6; break;
+            case '7': digit= 7; break;
+            case '8': digit= 8; break;
+            case '9': digit= 9;
+         }
+         if ((nv= v * 10 + digit) < v) {
+            ERROR("Decimal number is too large!");
+         }
+      #undef error
       v= nv;
    }
+   fail:
+   return 0;
 }
 
 int main(int argc, char **argv) {
@@ -177,37 +168,26 @@ int main(int argc, char **argv) {
       error=
          "Arguments: (write | verify) <password> [ <starting_byte_offset> ]"
       ;
-      fail:
-      (void)fprintf(
-            stderr, "%s failed: %s\n"
-         ,  argc ? argv[0] : "<unnamed program>", error
-      );
-      goto cleanup;
    }
    if (!strcmp(argv[1], "write")) tgs.write_mode= 1;
    else if (!strcmp(argv[1], "verify")) tgs.write_mode= 0;
    else goto bad_arguments;
    if (!*argv[2]) {
-      error= "Key must not be empty!";
-      goto fail;
+      ERROR("Key must not be empty!");
    }
    pearnd_init(argv[2], strlen(argv[2]));
-   /* */
    if (argc == 4) {
       tgs.pos= atou64(&error, argv[3]); if (error) goto fail;
       if (tgs.pos % tgs.blksz) {
-         error= "Starting offset must be a multiple of the I/O block size!";
-         goto fail;
+         ERROR("Starting offset must be a multiple of the I/O block size!");
       }
       if ((off_t)tgs.pos < 0) {
-         error= "Numeric overflow in offset!";
-         goto fail;
+         ERROR("Numeric overflow in offset!");
       }
       if (
          lseek(tgs.write_mode ? 1 : 0, (off_t)tgs.pos, SEEK_SET) == (off_t)-1
       ) {
-         error= "Could not reposition standard stream to starting position!";
-         goto fail;
+         ERROR("Could not reposition standard stream to starting position!");
       }
    } else {
       tgs.pos= 0;
@@ -218,8 +198,7 @@ int main(int argc, char **argv) {
             (rc= sysconf(_SC_NPROCESSORS_ONLN)) == -1
          || (threads= (unsigned)rc , (long)threads != rc)
       ) {
-         error= "Could not determine number of available CPU processors!";
-         goto fail;
+         ERROR("Could not determine number of available CPU processors!");
       }
    }
    if (threads < tgs.work_segments) {
@@ -268,8 +247,7 @@ int main(int argc, char **argv) {
                )
             ) == MAP_FAILED
          ) {
-            error= "Could not allocate I/O buffer!";
-            goto fail;
+            ERROR("Could not allocate I/O buffer!");
          }
       }
    }
@@ -278,13 +256,11 @@ int main(int argc, char **argv) {
    ;
    pearnd_seek(&po, tgs.pos);
    if (!tgs.write_mode) {
-      error= "Verify mode is not yet implemented!";
-      goto fail;
+      ERROR("Verify mode is not yet implemented!");
    }
    if (!(tid= calloc(threads, sizeof *tid))) {
       malloc_error:
-      error= "Memory allocation failure!";
-      goto fail;
+      ERROR("Memory allocation failure!");
    }
    have.tid= 1;
    if (!(tvalid= calloc(threads, sizeof *tvalid))) goto malloc_error;
@@ -293,17 +269,21 @@ int main(int argc, char **argv) {
       unsigned i;
       for (i= threads; i--; ) {
          if (pthread_create(&tid[i], 0, &thread_func, 0)) {
-            error= "Could not create worker thread!\n";
-            goto fail;
+            ERROR("Could not create worker thread!\n");
          }
          tvalid[i]= 1;
       }
    }
    if (fflush(0)) {
       write_error:
-      error= write_error_msg;
-      goto fail;
+      ERROR(write_error_msg);
    }
+   goto cleanup;
+   fail:
+   (void)fprintf(
+         stderr, "%s failed: %s\n"
+      ,  argc ? argv[0] : "<unnamed program>", error
+   );
    cleanup:
    if (have.tvalid) {
       unsigned i;
@@ -312,19 +292,16 @@ int main(int argc, char **argv) {
             tvalid[i]= 0;
             if (error) {
                if (pthread_cancel(tid[i])) {
-                  error= "Could not terminate child thread!\n";
-                  goto fail;
+                  ERROR("Could not terminate child thread!\n");
                }
             }
             {
                void *thread_error;
                if (pthread_join(tid[i], &thread_error)) {
-                  error= "Failure waiting for child thread to terminate!";
-                  goto fail;
+                  ERROR("Failure waiting for child thread to terminate!");
                }
                if (thread_error && thread_error != PTHREAD_CANCELED) {
-                  error= thread_error;
-                  goto fail;
+                  ERROR(thread_error);
                }
             }
          }
@@ -341,8 +318,7 @@ int main(int argc, char **argv) {
             void *old= tgs.shared_buffers[i]; tgs.shared_buffers[i]= 0;
             if (munmap(old, shared_buffer_size)) {
                unlikely_error:
-               error= exotic_error_msg;
-               goto fail;
+               ERROR(exotic_error_msg);
             }
          }
       }

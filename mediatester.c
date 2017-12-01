@@ -149,7 +149,6 @@ int main(int argc, char **argv) {
       unsigned workers_mutex: 1;
       unsigned io_mutex: 1;
       unsigned workers_wakeup_call: 1;
-      unsigned failure: 1;
    } have= {0};
    /* Preset global variables for interthread communication. */
    tgs.blksz= 4096;
@@ -269,12 +268,10 @@ int main(int argc, char **argv) {
    if (fflush(0)) write_error: ERROR(write_error_msg);
    goto cleanup;
    fail:
-   have.failure= 1;
    (void)fprintf(
          stderr, "%s failed: %s\n"
       ,  argc ? argv[0] : "<unnamed program>", error
    );
-   error= 0;
    cleanup:
    if (have.tvalid) {
       unsigned i;
@@ -326,5 +323,5 @@ int main(int argc, char **argv) {
       have.workers_wakeup_call= 0;
       if (pthread_cond_destroy(&tgs.workers_wakeup_call)) goto unlikely_error;
    }
-   return have.failure ? EXIT_FAILURE : EXIT_SUCCESS;
+   return error ? EXIT_FAILURE : EXIT_SUCCESS;
 }

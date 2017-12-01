@@ -2,19 +2,58 @@
 #include <pearson.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdint.h>
+#include <assert.h>
+#include <errno.h>
+#include <inttypes.h>
+#include <pthread.h>
 #include <sys/types.h>
 #include <unistd.h>
 #include <sys/mman.h>
-#include <errno.h>
 
+/* TWO such buffers will be allocated. */
 #define APPROXIMATE_BUFFER_SIZE (16ul << 20)
 
 static int write_mode;
-static uint8_t *shared_buffer;
+static uint8_t *shared_buffer, *shared_buffers[2];
 static uint8_t const *shared_buffer_stop;
-static size_t blksz;
-uint_fast64_t pos;
+static size_t blksz= 4096;
+static size_t work_segments= 64;
+static size_t work_segment_sz;
+static uint_fast64_t pos;
+static unsigned active_prng_threads;
+static pthread_mutex_t workers_mutex= PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t io_mutex= PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t workers_wakeup_call= PTHREAD_COND_INITIALIZER;
+
+#define CEIL_DIV(num, den) (((num) + (den) - 1) / (den))
+
+static void *thread_func(void *dummy) {
+   char const *error;
+   struct {
+      unsigned wmtx: 1;
+   } have= {0};
+   (void)dummy;
+   if (pthread_mutex_lock(&workers_mutex)) {
+      error= "Could not lock mutex!";
+      fail:
+      (void)fprintf(stderr, "Failure in thread: %s\n", error);
+      goto cleanup;
+   }
+   have.wmtx= 1;
+   if (pthread_cond_wait(&workers_wakeup_call, &workers_mutex)) {
+      error= "Could not wait for condition variable!";
+      goto fail;
+   }
+   cleanup:
+   if (have.wmtx) {
+      have.wmtx= 0;
+      if (pthread_mutex_unlock(&workers_mutex)) {
+         error= "Could not unlock mutex!";
+         goto fail;
+      }
+   }
+   return 0;
+}
               
 static uint_fast64_t atou64(char const **error, char const *numeric) {
    uint_fast64_t v= 0, nv;
@@ -53,11 +92,12 @@ int main(int argc, char **argv) {
    pearnd_offset po;
    size_t shared_buffer_size;
    unsigned threads;
-   if (argc < 4 || argc > 5) {
+   pthread_t *tid= 0;
+   char *tvalid= 0;
+   if (argc < 3 || argc > 4) {
       bad_arguments:
       error=
-         "Arguments: (write | verify) <password> <io_block_size>"
-         " [ <starting_byte_offset> ]"
+         "Arguments: (write | verify) <password> [ <starting_byte_offset> ]"
       ;
       fail:
       (void)fprintf(
@@ -74,20 +114,8 @@ int main(int argc, char **argv) {
       goto fail;
    }
    pearnd_init(argv[2], strlen(argv[2]));
-   blksz= (size_t)atou64(&error, argv[3]); if (error) goto fail;
-   {
-      size_t mask= 512;
-      while (blksz ^ mask) {
-         size_t nmask;
-         if ((nmask= mask + mask) < mask) {
-            error= "I/O block size must be a power of 2 and be >= 512!";
-            goto fail;
-         }
-         mask= nmask;
-      }
-   }
-   if (argc == 5) {
-      pos= atou64(&error, argv[4]); if (error) goto fail;
+   if (argc == 4) {
+      pos= atou64(&error, argv[3]); if (error) goto fail;
       if (pos % blksz) {
          error= "Starting offset must be a multiple of the I/O block size!";
          goto fail;
@@ -113,23 +141,80 @@ int main(int argc, char **argv) {
          goto fail;
       }
    }
-   ++threads; /* Create one thread more than processors just for safety. */
-   shared_buffer_size= (APPROXIMATE_BUFFER_SIZE + blksz - 1) / blksz * blksz;
-   if (
-      (
-         shared_buffer= mmap(
-               0, shared_buffer_size, PROT_READ | PROT_WRITE
-            ,  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0
-         )
-      ) == MAP_FAILED
-   ) {
-      error= "Could not allocate I/O buffer!";
-      goto fail;
+   if (threads < work_segments) {
+      if (threads == 1) work_segments= 1;
+      work_segments= work_segments / threads * threads;
+      assert(work_segments >= 1);
+   } else {
+      work_segments= threads;
    }
-   shared_buffer_stop= shared_buffer + shared_buffer_size;
+   work_segment_sz= CEIL_DIV(APPROXIMATE_BUFFER_SIZE, work_segments);
+   work_segment_sz= CEIL_DIV(work_segment_sz, blksz) * blksz;
+   shared_buffer_size= work_segment_sz * work_segments;
+   if (
+      fprintf(
+            stderr
+         ,  "Starting output offset: %" PRIdFAST64 " bytes\n"
+            "Optimum device I/O block size: %u\n"
+            "PRNG worker threads: %u\n"
+            "worker's buffer segment size: %lu bytes\n"
+            "number of worker segments: %lu\n"
+            "size of buffer subdivided into worker segments: %lu bytes\n"
+            "number of such buffers: %u\n"
+         ,  pos
+         ,  (unsigned)blksz
+         ,  threads
+         ,  (unsigned long)work_segment_sz
+         ,  (unsigned long)work_segments
+         ,  (unsigned long)shared_buffer_size
+         ,  (unsigned)DIM(shared_buffers)
+      ) <= 0
+   ) {
+      goto write_error;
+   }
+   /* The threads will encrypt/decrypt. An additional thread does I/O. The
+    * main program thread only waits for termination of the other threads. */
+   ++threads;
+   {
+      unsigned i;
+      for (i= (unsigned)DIM(shared_buffers); i--; ) {
+         if (
+            (
+               shared_buffers[i]= mmap(
+                     0, shared_buffer_size, PROT_READ | PROT_WRITE
+                  ,  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0
+               )
+            ) == MAP_FAILED
+         ) {
+            error= "Could not allocate I/O buffer!";
+            goto fail;
+         }
+      }
+   }
+   shared_buffer_stop= shared_buffer= shared_buffers[0] + shared_buffer_size;
    pearnd_seek(&po, pos);
    if (!write_mode) {
       error= "Verify mode is not yet implemented!";
+      goto fail;
+   }
+   if (!(tvalid= calloc(threads, sizeof *tvalid))) {
+      malloc_error:
+      error= "Memory allocation failure!";
+      goto fail;
+   }
+   if (!(tid= calloc(threads, sizeof *tid))) goto malloc_error;
+   {
+      unsigned i;
+      for (i= threads; i--; ) {
+         if (pthread_create(&tid[i], 0, &thread_func, 0)) {
+            error= "Could not create worker thread!\n";
+            goto fail;
+         }
+         tvalid[i]= 1;
+      }
+   }
+   if (pthread_cond_broadcast(&workers_wakeup_call)) {
+      error= "Could not wake up worker threads!";
       goto fail;
    }
    for (;;) {
@@ -154,12 +239,31 @@ int main(int argc, char **argv) {
       goto fail;
    }
    cleanup:
-   if (shared_buffer) {
-      void *old= shared_buffer; shared_buffer= 0;
-      if (munmap(old, shared_buffer_size)) {
-         exotic_error:
-         error= "Internal error (this should normally never happen).\n";
-         goto fail;
+   if (tvalid) {
+      unsigned i;
+      for (i= threads; i--; ) {
+         if (tvalid[i]) {
+            tvalid[i]= 0;
+            if (pthread_join(tid[i], 0)) {
+               error= "Failure waiting for child thread to terminate!";
+               goto fail;
+            }
+         }
+      }
+      free(tid);
+      free(tvalid); tvalid= 0;
+   }
+   {
+      unsigned i;
+      for (i= (unsigned)DIM(shared_buffers); i--; ) {
+         if (shared_buffers[i]) {
+            void *old= shared_buffers[i]; shared_buffers[i]= 0;
+            if (munmap(old, shared_buffer_size)) {
+               exotic_error:
+               error= "Internal error (this should normally never happen).\n";
+               goto fail;
+            }
+         }
       }
    }
    return error ? EXIT_FAILURE : EXIT_SUCCESS;

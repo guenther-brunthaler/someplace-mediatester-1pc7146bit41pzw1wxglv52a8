@@ -1,6 +1,6 @@
 OBJECTS = $(SOURCES:.c=.o)
 TARGETS = $(OBJECTS:.o=)
-LIBS = $(LIB_1_SUBDIR)/lib$(LIB_1_SUBDIR).a
+LIBS = $(LIB_1_SUBDIR)/lib$(LIB_1_SUBDIR).a -lpthread
 
 LIB_1_SUBDIR =  fragments
 LIB_1_INC_SUBDIR = include
@@ -18,7 +18,9 @@ deepclean: clean
 	for lib in $(LIBS); do (cd "`dirname "$$lib"`" && $(MAKE) clean); done
 
 COMBINED_CFLAGS= $(CPPFLAGS) $(CFLAGS)
-AUG_CFLAGS = $(COMBINED_CFLAGS) -I $(LIB_1_SUBDIR)/$(LIB_1_INC_SUBDIR)
+AUG_CFLAGS = \
+	$(COMBINED_CFLAGS) -pthread \
+	-I $(LIB_1_SUBDIR)/$(LIB_1_INC_SUBDIR)
 
 .c.o:
 	$(CC) $(AUG_CFLAGS) -c $<

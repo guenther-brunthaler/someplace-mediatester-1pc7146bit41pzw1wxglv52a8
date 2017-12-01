@@ -55,7 +55,7 @@ static char const write_error_msg[]= {"Write error!"};
  * exists only one such instance anyway. Also, accessing global variables is
  * typically faster. */
 static void *thread_func(void *unused_dummy) {
-   char const *error= 0;
+   char const *error, *first_error= 0;
    struct { unsigned workers_mutex_procured; } have= {0};
    (void)unused_dummy;
    if (pthread_mutex_lock(&tgs.workers_mutex)) {
@@ -110,7 +110,10 @@ static void *thread_func(void *unused_dummy) {
       if (pthread_mutex_lock(&tgs.workers_mutex)) goto lock_error;
       goto check_for_work;
    }
+   goto cleanup;
    fail:
+   if (!first_error) first_error= error;
+   cleanup:
    if (have.workers_mutex_procured) {
       have.workers_mutex_procured= 0;
       if (pthread_mutex_unlock(&tgs.workers_mutex)) {
@@ -118,7 +121,7 @@ static void *thread_func(void *unused_dummy) {
          ERROR("Could not unlock mutex!");
       }
    }
-   return (void *)error;
+   return (void *)first_error;
 }
               
 static uint_fast64_t atou64(char const **error, char const *numeric) {
@@ -147,7 +150,7 @@ static uint_fast64_t atou64(char const **error, char const *numeric) {
       v= nv;
    }
    fail:
-   return 0;
+   return ~UINT64_C(0) / 3;  /* Should not be used at all by caller! */
 }
 
 int main(int argc, char **argv) {

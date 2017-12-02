@@ -18,6 +18,7 @@
 #include <string.h>
 #include <assert.h>
 #include <errno.h>
+#include <signal.h>
 #include <inttypes.h>
 #include <pthread.h>
 #include <sys/types.h>
@@ -28,12 +29,13 @@
 #define APPROXIMATE_BUFFER_SIZE (16ul << 20)
 
 static struct {
-   int write_mode;
+   int write_mode, shutdown_requested /* = 0; */;
    uint8_t *shared_buffer, *shared_buffers[2];
    uint8_t const *shared_buffer_stop;
    size_t blksz;
    size_t work_segments;
    size_t work_segment_sz;
+   size_t shared_buffer_size;
    uint_fast64_t pos;
    unsigned active_threads /* = 0; */;
    pthread_mutex_t workers_mutex;
@@ -58,59 +60,122 @@ static void *thread_func(void *unused_dummy) {
    char const *error, *first_error= 0;
    struct { unsigned workers_mutex_procured; } have= {0};
    (void)unused_dummy;
+   /* Lock the mutex before acessing the global work state variables. */
    if (pthread_mutex_lock(&tgs.workers_mutex)) {
       lock_error:
       ERROR("Could not lock mutex!");
    }
    have.workers_mutex_procured= 1;
-   check_for_work:
-   if (tgs.shared_buffer == tgs.shared_buffer_stop) {
-      /* All worker segments have already been assigned to some thread. */
-      if (tgs.active_threads == 0) {
-         /* And all the worker threads have finished! Let's do I/O then. */
-         for (;;) {
-            ssize_t written;
-            uint8_t const *out;
-            size_t left;
-            out= tgs.shared_buffer;
-            if ((written= write(1, out, left)) <= 0) {
-               if (written == 0) break;
-               if (written != -1) unlikely_error: ERROR(exotic_error_msg);
-               if (errno != EINTR) ERROR(write_error_msg);
-               written= 0;
+   ++tgs.active_threads; /* We just woke up (or have started). */
+   /* Thread main loop. */
+   for (;;) {
+      assert(have.workers_mutex_procured);
+      assert(tgs.active_threads >= 1);
+      if (tgs.shutdown_requested) {
+         shutdown:
+         --tgs.active_threads;
+         goto cleanup;
+      }
+      if (tgs.shared_buffer == tgs.shared_buffer_stop) {
+         /* All worker segments have already been assigned to some thread. */
+         if (tgs.active_threads == 1) {
+            /* And we are the last thread running! Let's do I/O then. */
+            {
+               uint8_t const *out;
+               size_t left;
+               /* Switch buffers so other threads can resume working. */
+               if (
+                     tgs.shared_buffer - (left= tgs.shared_buffer_size)
+                  == tgs.shared_buffers[0]
+               ) {
+                  out= tgs.shared_buffers[0];
+                  tgs.shared_buffer= tgs.shared_buffers[1];
+               } else {
+                  out= tgs.shared_buffers[1];
+                  assert(tgs.shared_buffer - left == out);
+                  tgs.shared_buffer= tgs.shared_buffers[0];
+               }
+               tgs.shared_buffer_stop= tgs.shared_buffer + left;
+               have.workers_mutex_procured= 0;
+               if (pthread_mutex_unlock(&tgs.workers_mutex)) goto unlock_error;
+               /* Wake up other threads so they can start working on the other
+                * buffer. */
+               if (pthread_cond_broadcast(&tgs.workers_wakeup_call)) {
+                  wakeup_error:
+                  ERROR("Could not wake up worker threads!");
+               }
+               /* Write the old buffer while the other threads already fill
+                * the new buffer. */
+               for (;;) {
+                  ssize_t written;
+                  if ((written= write(1, out, left)) <= 0) {
+                     if (written == 0) break;
+                     if (written != -1) {
+                        unlikely_error: ERROR(exotic_error_msg);
+                     }
+                     /* The write() has failed. Examine why. */
+                     switch (errno) {
+                        case ENOSPC: /* We filled up the filesystem. */
+                        case EPIPE: /* Output stream has ended. */
+                        case EDQUOT: /* Quota has been reached. */
+                        case EFBIG: /* Maximum output size reached. */
+                           /* Those are all considered "good" reasons why the
+                            * write() has failed. */
+                           assert(left > 0);
+                           goto finished;
+                        case EINTR: continue; /* Interrupted write(). */
+                     }
+                     ERROR(write_error_msg);
+                  }
+                  if ((size_t)written > left) goto unlikely_error;
+                  out+= (size_t)written;
+                  left-= (size_t)written;
+               }
+               finished:
+               if (pthread_mutex_lock(&tgs.workers_mutex)) goto lock_error;
+               have.workers_mutex_procured= 1;
+               if (left) {
+                  /* Output data sink does not accept any more data - we are
+                   * done. Initiate successful termination. */
+                  tgs.shutdown_requested= 1;
+                  /* Make sure any sleeping threads will wake up to learn
+                   * about the shutdown request. */
+                  if (pthread_cond_broadcast(&tgs.workers_wakeup_call)) {
+                     goto wakeup_error;
+                  }
+                  goto shutdown;
+               }
             }
-            if ((size_t)written > left) goto unlikely_error;
-            out+= (size_t)written;
-            left-= (size_t)written;
-         }
-         if (pthread_cond_broadcast(&tgs.workers_wakeup_call)) {
-            ERROR("Could not wake up worker threads!");
+         } else {
+            assert(tgs.active_threads >= 2);
+            /* We have nothing to do, but other worker threads are still
+             * active. Just wait until there is again possibly something to
+             * do. */
+            --tgs.active_threads;
+            have.workers_mutex_procured= 0;
+            if (
+               pthread_cond_wait(&tgs.workers_wakeup_call, &tgs.workers_mutex)
+            ) {
+               ERROR("Could not wait for condition variable!");
+            }
+            have.workers_mutex_procured= 1;
+            ++tgs.active_threads;
          }
       } else {
-         /* We have nothing to do, but other worker threads are still active.
-          * Just wait until there is again possibly something to do. */
-         --tgs.active_threads;
-         if (pthread_cond_wait(&tgs.workers_wakeup_call, &tgs.workers_mutex)) {
-            ERROR("Could not wait for condition variable!");
-         }
+         /* There is more work to do. Seize the next work segment. */
+         pearnd_offset po;
+         uint8_t *work_segment= tgs.shared_buffer;
+         tgs.shared_buffer+= tgs.work_segment_sz;
+         pearnd_seek(&po, tgs.pos);
+         tgs.pos+= tgs.work_segment_sz;
+         /* Allow other threads to seize work segments as well. */
+         /* Do every worker thread's primary job: Process its work segment. */
+         pearnd_generate(work_segment, tgs.work_segment_sz, &po);
+         /* See whether we can get the next job. */
+         if (pthread_mutex_lock(&tgs.workers_mutex)) goto lock_error;
+         have.workers_mutex_procured= 1;
       }
-   } else {
-      /* There is more work to do. Seize the next work segment. */
-      pearnd_offset po;
-      uint8_t *work_segment= tgs.shared_buffer;
-      tgs.shared_buffer+= tgs.work_segment_sz;
-      pearnd_seek(&po, tgs.pos);
-      tgs.pos+= tgs.work_segment_sz;
-      /* Allow other threads to seize work segments as well. */
-      have.workers_mutex_procured= 0;
-      if (pthread_mutex_unlock(&tgs.workers_mutex)) goto unlock_error;
-      /* Do every worker thread's primary job: Process its work segment. */
-      pearnd_generate(work_segment, tgs.work_segment_sz, &po);
-      /* See whether we can get the next job. */
-      if (pthread_mutex_lock(&tgs.workers_mutex)) goto lock_error;
-      goto check_for_work;
    }
-   goto cleanup;
    fail:
    if (!first_error) first_error= error;
    cleanup:
@@ -156,7 +221,6 @@ static uint_fast64_t atou64(char const **error, char const *numeric) {
 int main(int argc, char **argv) {
    char const *error= 0;
    pearnd_offset po;
-   size_t shared_buffer_size;
    unsigned threads;
    pthread_t *tid;
    char *tvalid;
@@ -167,6 +231,8 @@ int main(int argc, char **argv) {
       unsigned io_mutex: 1;
       unsigned workers_wakeup_call: 1;
    } have= {0};
+   /* Ignore SIGPIPE because we want it as a possible errno from write(). */
+   if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) goto unlikely_error;
    /* Preset global variables for interthread communication. */
    tgs.blksz= 4096;
    tgs.work_segments= 64;
@@ -224,7 +290,7 @@ int main(int argc, char **argv) {
    ++threads;
    tgs.work_segment_sz= CEIL_DIV(APPROXIMATE_BUFFER_SIZE, tgs.work_segments);
    tgs.work_segment_sz= CEIL_DIV(tgs.work_segment_sz, tgs.blksz) * tgs.blksz;
-   shared_buffer_size= tgs.work_segment_sz * tgs.work_segments;
+   tgs.shared_buffer_size= tgs.work_segment_sz * tgs.work_segments;
    if (
       fprintf(
             stderr
@@ -240,7 +306,7 @@ int main(int argc, char **argv) {
          ,  threads - 1
          ,  (unsigned long)tgs.work_segment_sz
          ,  (unsigned long)tgs.work_segments
-         ,  (unsigned long)shared_buffer_size
+         ,  (unsigned long)tgs.shared_buffer_size
          ,  (unsigned)DIM(tgs.shared_buffers)
       ) <= 0
    ) {
@@ -252,7 +318,7 @@ int main(int argc, char **argv) {
          if (
             (
                tgs.shared_buffers[i]= mmap(
-                     0, shared_buffer_size, PROT_READ | PROT_WRITE
+                     0, tgs.shared_buffer_size, PROT_READ | PROT_WRITE
                   ,  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0
                )
             ) == MAP_FAILED
@@ -262,7 +328,7 @@ int main(int argc, char **argv) {
       }
    }
    tgs.shared_buffer_stop=
-      tgs.shared_buffer= tgs.shared_buffers[0] + shared_buffer_size
+      tgs.shared_buffer= tgs.shared_buffers[0] + tgs.shared_buffer_size
    ;
    pearnd_seek(&po, tgs.pos);
    if (!tgs.write_mode) ERROR("Verify mode is not yet implemented!");
@@ -321,7 +387,7 @@ int main(int argc, char **argv) {
       for (i= (unsigned)DIM(tgs.shared_buffers); i--; ) {
          if (tgs.shared_buffers[i]) {
             void *old= tgs.shared_buffers[i]; tgs.shared_buffers[i]= 0;
-            if (munmap(old, shared_buffer_size)) {
+            if (munmap(old, tgs.shared_buffer_size)) {
                unlikely_error:
                ERROR(exotic_error_msg);
             }

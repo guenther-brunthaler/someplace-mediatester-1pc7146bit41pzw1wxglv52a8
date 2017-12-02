@@ -19,15 +19,19 @@
 #include <dim_sdbrke8ae851uitgzm4nv3ea2.h>
 #include <pearson.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <assert.h>
 #include <errno.h>
 #include <signal.h>
 #include <inttypes.h>
 #include <pthread.h>
-#include <sys/types.h>
 #include <unistd.h>
+#include <sys/types.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/ioctl.h>
+#include <linux/fs.h>
 
 #ifndef MAP_ANONYMOUS
    #error "MAP_ANONYMOUS is not defined by <sys/mman.h>!" \
@@ -43,7 +47,7 @@ static struct {
    int write_mode, shutdown_requested /* = 0; */;
    uint8_t *shared_buffer, *shared_buffers[2];
    uint8_t const *shared_buffer_stop;
-   size_t blksz;
+   size_t blksz /* = 0; */;
    size_t work_segments;
    size_t work_segment_sz;
    size_t shared_buffer_size;
@@ -230,7 +234,6 @@ static uint_fast64_t atou64(char const **error, char const *numeric) {
 
 int main(int argc, char **argv) {
    char const *error= 0;
-   pearnd_offset po;
    unsigned threads;
    pthread_t *tid;
    char *tvalid;
@@ -243,7 +246,6 @@ int main(int argc, char **argv) {
    /* Ignore SIGPIPE because we want it as a possible errno from write(). */
    if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) goto unlikely_error;
    /* Preset global variables for interthread communication. */
-   tgs.blksz= 4096;
    tgs.work_segments= 64;
    if (pthread_mutex_init(&tgs.workers_mutex, 0)) goto unlikely_error;
    have.workers_mutex= 1;
@@ -259,6 +261,50 @@ int main(int argc, char **argv) {
    if (!strcmp(argv[1], "write")) tgs.write_mode= 1;
    else if (!strcmp(argv[1], "verify")) tgs.write_mode= 0;
    else goto bad_arguments;
+   /* Determine the best I/O block size, defaulting the value preset
+    * earlier. */
+   {
+      struct stat st;
+      int fd;
+      mode_t mode;
+      if (fstat(fd= tgs.write_mode ? 1 : 0, &st)) {
+         ERROR("Cannot examine file descriptor to be used for I/O!");
+      }
+      if (S_ISBLK(mode= st.st_mode)) {
+         /* It's a block device. */
+         {
+            long logical;
+            if (ioctl(fd, BLKSSZGET, &logical) < 0) {
+               ERROR("Unable to determine logical sector size!");
+            }
+            if ((size_t)logical > tgs.blksz) tgs.blksz= (size_t)logical;
+         }
+         {
+            long physical;
+            if (ioctl(fd, BLKPBSZGET, &physical) < 0) {
+               ERROR("Unable to determine physical sector size!");
+            }
+            if ((size_t)physical > tgs.blksz) tgs.blksz= (size_t)physical;
+         }
+      } else {
+         /* Some other kind of data source/sink. Assume the maximum of the MMU
+          * page size, the atomic pipe size and the fallback value. */
+          long page_size;
+          if ((page_size= sysconf(_SC_PAGESIZE)) == -1) goto unlikely_error;
+          if ((size_t)page_size > tgs.blksz) tgs.blksz= (size_t)page_size;
+          if (PIPE_BUF > tgs.blksz) tgs.blksz= PIPE_BUF;
+      }
+   }
+   {
+      size_t bmask= 512; /* <blksz> must be a power of 2 >= this value. */
+      while (tgs.blksz ^ bmask) {
+         size_t nmask;
+         if (!((nmask= bmask + bmask) > bmask)) {
+            ERROR("Could not determine a suitable I/O block size");
+         }
+         bmask= nmask;
+      }
+   }
    if (!*argv[2]) ERROR("Key must not be empty!");
    pearnd_init(argv[2], strlen(argv[2]));
    if (argc == 4) {
@@ -337,7 +383,6 @@ int main(int argc, char **argv) {
    tgs.shared_buffer_stop=
       tgs.shared_buffer= tgs.shared_buffers[0] + tgs.shared_buffer_size
    ;
-   pearnd_seek(&po, tgs.pos);
    if (!tgs.write_mode) ERROR("Verify mode is not yet implemented!");
    if (!(tid= calloc(threads, sizeof *tid))) {
       malloc_error:

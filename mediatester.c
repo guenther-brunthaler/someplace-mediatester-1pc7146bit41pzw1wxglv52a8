@@ -50,7 +50,6 @@ static struct {
    uint_fast64_t pos;
    unsigned active_threads /* = 0; */;
    pthread_mutex_t workers_mutex;
-   pthread_mutex_t io_mutex;
    pthread_cond_t workers_wakeup_call;
 } tgs; /* Thread global storage */
 
@@ -239,7 +238,6 @@ int main(int argc, char **argv) {
       unsigned tvalid: 1;
       unsigned tid: 1;
       unsigned workers_mutex: 1;
-      unsigned io_mutex: 1;
       unsigned workers_wakeup_call: 1;
    } have= {0};
    /* Ignore SIGPIPE because we want it as a possible errno from write(). */
@@ -249,8 +247,6 @@ int main(int argc, char **argv) {
    tgs.work_segments= 64;
    if (pthread_mutex_init(&tgs.workers_mutex, 0)) goto unlikely_error;
    have.workers_mutex= 1;
-   if (pthread_mutex_init(&tgs.io_mutex, 0)) goto unlikely_error;
-   have.io_mutex= 1;
    if (pthread_cond_init(&tgs.workers_wakeup_call, 0)) goto unlikely_error;
    have.workers_wakeup_call= 1;
    /* Process arguments. */
@@ -408,10 +404,6 @@ int main(int argc, char **argv) {
    if (have.workers_mutex) {
       have.workers_mutex= 0;
       if (pthread_mutex_destroy(&tgs.workers_mutex)) goto unlikely_error;
-   }
-   if (have.io_mutex) {
-      have.io_mutex= 0;
-      if (pthread_mutex_destroy(&tgs.io_mutex)) goto unlikely_error;
    }
    if (have.workers_wakeup_call) {
       have.workers_wakeup_call= 0;

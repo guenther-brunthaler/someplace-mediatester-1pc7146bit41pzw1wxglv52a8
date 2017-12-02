@@ -183,6 +183,8 @@ static void *thread_func(void *unused_dummy) {
          pearnd_seek(&po, tgs.pos);
          tgs.pos+= tgs.work_segment_sz;
          /* Allow other threads to seize work segments as well. */
+         have.workers_mutex_procured= 0;
+         if (pthread_mutex_unlock(&tgs.workers_mutex)) goto unlock_error;
          /* Do every worker thread's primary job: Process its work segment. */
          pearnd_generate(work_segment, tgs.work_segment_sz, &po);
          /* See whether we can get the next job. */

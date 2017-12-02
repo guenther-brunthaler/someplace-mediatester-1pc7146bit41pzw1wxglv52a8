@@ -381,7 +381,7 @@ int main(int argc, char **argv) {
       }
    }
    tgs.shared_buffer_stop=
-      tgs.shared_buffer= tgs.shared_buffers[0] + tgs.shared_buffer_size
+      (tgs.shared_buffer= tgs.shared_buffers[0]) + tgs.shared_buffer_size
    ;
    if (!tgs.write_mode) ERROR("Verify mode is not yet implemented!");
    if (!(tid= calloc(threads, sizeof *tid))) {

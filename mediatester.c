@@ -12,6 +12,10 @@
  * This source file is free software.
  * Distribution is permitted under the terms of the GPLv3.  */
 
+#if !defined __STDC_VERSION__ || __STDC_VERSION__ < 199901
+   #error "This source file requires a C99 compliant C compiler!"
+#endif
+
 #include <dim_sdbrke8ae851uitgzm4nv3ea2.h>
 #include <pearson.h>
 #include <stdio.h>
@@ -24,6 +28,13 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include <sys/mman.h>
+
+#ifndef MAP_ANONYMOUS
+   #error "MAP_ANONYMOUS is not defined by <sys/mman.h>!" \
+      "For Linux, add '-D _GNU_SOURCE' to C preprocessor flags." \
+      "For BSD, add '-D _BSD_SOURCE' to fix the problem." \
+      "For other OSes, examine yourself what '-D'-options to add."
+#endif
 
 /* TWO such buffers will be allocated. */
 #define APPROXIMATE_BUFFER_SIZE (16ul << 20)
@@ -297,16 +308,16 @@ int main(int argc, char **argv) {
          ,  "Starting output offset: %" PRIdFAST64 " bytes\n"
             "Optimum device I/O block size: %u\n"
             "PRNG worker threads: %u\n"
-            "worker's buffer segment size: %lu bytes\n"
-            "number of worker segments: %lu\n"
-            "size of buffer subdivided into worker segments: %lu bytes\n"
+            "worker's buffer segment size: %zu bytes\n"
+            "number of worker segments: %zu\n"
+            "size of buffer subdivided into worker segments: %zu bytes\n"
             "number of such buffers: %u\n"
          ,  tgs.pos
          ,  (unsigned)tgs.blksz
          ,  threads - 1
-         ,  (unsigned long)tgs.work_segment_sz
-         ,  (unsigned long)tgs.work_segments
-         ,  (unsigned long)tgs.shared_buffer_size
+         ,  tgs.work_segment_sz
+         ,  tgs.work_segments
+         ,  tgs.shared_buffer_size
          ,  (unsigned)DIM(tgs.shared_buffers)
       ) <= 0
    ) {

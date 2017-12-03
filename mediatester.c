@@ -44,7 +44,7 @@
 #define APPROXIMATE_BUFFER_SIZE (16ul << 20)
 
 static struct {
-   int write_mode, shutdown_requested /* = 0; */;
+   int read_mode, shutdown_requested /* = 0; */;
    uint8_t *shared_buffer, *shared_buffers[2];
    uint8_t const *shared_buffer_stop;
    size_t blksz /* = 0; */;
@@ -61,15 +61,15 @@ static struct {
 
 #define ERROR(msg) { error= msg; goto fail; }
 
-static char const exotic_error_msg[]= {
+static char const msg_exotic_error[]= {
    "Internal error! (This should normally never happen.)"
 };
 
-static char const write_error_msg[]= {"Write error!"};
+static char const msg_write_error[]= {"Write error!"};
 
-/* We *could* pass &tgs as a paramater, but there is no point because there
+/* We *could* pass &tgs as the argument, but there is no point because there
  * exists only one such instance anyway. Also, accessing global variables is
- * typically faster. */
+ * typically faster than accessing variables indirectly via a pointer. */
 static void *thread_func(void *unused_dummy) {
    char const *error, *first_error= 0;
    struct { unsigned workers_mutex_procured; } have= {0};
@@ -93,8 +93,11 @@ static void *thread_func(void *unused_dummy) {
       if (tgs.shared_buffer == tgs.shared_buffer_stop) {
          /* All worker segments have already been assigned to some thread. */
          if (tgs.active_threads == 1) {
-            /* And we are the last thread running! Let's do I/O then. */
-            {
+            /* And we are the first/last thread running! Let's do I/O then. */
+            if (tgs.read_mode == 0) {
+               /* In write mode, we switch the buffer first, and let then the
+                * other threads fill the next buffer while we write out the
+                * old buffer's contents. */
                uint8_t const *out;
                size_t left;
                /* Switch buffers so other threads can resume working. */
@@ -125,7 +128,7 @@ static void *thread_func(void *unused_dummy) {
                   if ((written= write(1, out, left)) <= 0) {
                      if (written == 0) break;
                      if (written != -1) {
-                        unlikely_error: ERROR(exotic_error_msg);
+                        unlikely_error: ERROR(msg_exotic_error);
                      }
                      /* The write() has failed. Examine why. */
                      switch (errno) {
@@ -139,7 +142,7 @@ static void *thread_func(void *unused_dummy) {
                            goto finished;
                         case EINTR: continue; /* Interrupted write(). */
                      }
-                     ERROR(write_error_msg);
+                     ERROR(msg_write_error);
                   }
                   if ((size_t)written > left) goto unlikely_error;
                   out+= (size_t)written;
@@ -159,6 +162,10 @@ static void *thread_func(void *unused_dummy) {
                   }
                   goto shutdown;
                }
+            } else {
+               /* In verify mode, we first need to read the next buffer, and
+                * only then we can let the other threads verify its contents,
+                * while we already read the buffer after the next one. */
             }
          } else {
             assert(tgs.active_threads >= 2);
@@ -260,8 +267,8 @@ int main(int argc, char **argv) {
          "Arguments: (write | verify) <password> [ <starting_byte_offset> ]"
       );
    }
-   if (!strcmp(argv[1], "write")) tgs.write_mode= 1;
-   else if (!strcmp(argv[1], "verify")) tgs.write_mode= 0;
+   if (!strcmp(argv[1], "write")) tgs.read_mode= 0;
+   else if (!strcmp(argv[1], "verify")) tgs.read_mode= 1;
    else goto bad_arguments;
    /* Determine the best I/O block size, defaulting the value preset
     * earlier. */
@@ -269,7 +276,7 @@ int main(int argc, char **argv) {
       struct stat st;
       int fd;
       mode_t mode;
-      if (fstat(fd= tgs.write_mode ? 1 : 0, &st)) {
+      if (fstat(fd= !tgs.read_mode, &st)) {
          ERROR("Cannot examine file descriptor to be used for I/O!");
       }
       if (S_ISBLK(mode= st.st_mode)) {
@@ -315,9 +322,7 @@ int main(int argc, char **argv) {
          ERROR("Starting offset must be a multiple of the I/O block size!");
       }
       if ((off_t)tgs.pos < 0) ERROR("Numeric overflow in offset!");
-      if (
-         lseek(tgs.write_mode ? 1 : 0, (off_t)tgs.pos, SEEK_SET) == (off_t)-1
-      ) {
+      if (lseek(!!tgs.read_mode, (off_t)tgs.pos, SEEK_SET) == (off_t)-1) {
          ERROR("Could not reposition standard stream to starting position!");
       }
    } else {
@@ -385,7 +390,9 @@ int main(int argc, char **argv) {
    tgs.shared_buffer_stop=
       (tgs.shared_buffer= tgs.shared_buffers[0]) + tgs.shared_buffer_size
    ;
-   if (!tgs.write_mode) ERROR("Verify mode is not yet implemented!");
+   /* In verify mode, we start with a "finished" buffer, forcing the next
+    * buffer to be read as the first worker thread action. */
+   if (tgs.read_mode) tgs.shared_buffer= (void *)tgs.shared_buffer_stop;
    if (!(tid= calloc(threads, sizeof *tid))) {
       malloc_error:
       ERROR("Memory allocation failure!");
@@ -402,7 +409,7 @@ int main(int argc, char **argv) {
          tvalid[i]= 1;
       }
    }
-   if (fflush(0)) write_error: ERROR(write_error_msg);
+   if (fflush(0)) write_error: ERROR(msg_write_error);
    goto cleanup;
    fail:
    (void)fprintf(
@@ -443,7 +450,7 @@ int main(int argc, char **argv) {
             void *old= tgs.shared_buffers[i]; tgs.shared_buffers[i]= 0;
             if (munmap(old, tgs.shared_buffer_size)) {
                unlikely_error:
-               ERROR(exotic_error_msg);
+               ERROR(msg_exotic_error);
             }
          }
       }

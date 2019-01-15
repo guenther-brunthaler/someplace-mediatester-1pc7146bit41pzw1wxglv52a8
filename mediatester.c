@@ -5,13 +5,14 @@
  * bytes written before are still present. Both write and verification mode
  * try to make use of the available CPU cores to create the pseudorandom data
  * data as quickly as possible in parallel, and double buffering is employed
- * to allow disk I/O to run (mostly) in parallel, too.
- *
- * Version 2019.15
- * Copyright (c) 2017-2019 Guenther Brunthaler. All rights reserved.
- *
- * This source file is free software.
- * Distribution is permitted under the terms of the GPLv3.  */
+ * to allow disk I/O to run (mostly) in parallel, too. */
+
+#define VERSION_INFO \
+ "Version 2019.15.1\n" \
+ "Copyright (c) 2017-2019 Guenther Brunthaler. All rights reserved.\n" \
+ "\n" \
+ "This program is free software.\n" \
+ "Distribution is permitted under the terms of the GPLv3."
 
 #if !defined __STDC_VERSION__ || __STDC_VERSION__ < 199901
    #error "This source file requires a C99 compliant C compiler!"
@@ -311,6 +312,28 @@ static uint_fast64_t atou64(char const **error, char const *numeric) {
    return ~UINT64_C(0) / 3;  /* Should not be used at all by caller! */
 }
 
+static void load_seed(char const **error, char const *seed_file) {
+   #define MAX_SEED_BYTES 256
+   char seed[MAX_SEED_BYTES + 1]; /* 1 byte larger than actually allowed. */
+   size_t read;
+   FILE *fh;
+   #define error *error
+   if (!(fh= fopen(seed_file, "rb"))) rd_err: ERROR("Cannot read seed file!");
+   if ((read= fread(seed, sizeof *seed, DIM(seed), fh)) == DIM(seed)) {
+      ERROR("Key file for seeding the PRNG is larger than supported!");
+   }
+   if (ferror(fh)) goto rd_err;
+   assert(feof(fh));
+   if (!read) ERROR("Seed file must not be empty!");
+   pearnd_init(seed, read);
+   fail:
+   if (fh) {
+      FILE *old= fh; fh= 0;
+      if (fclose(old)) ERROR(msg_exotic_error);
+   }
+   #undef error
+}
+
 int main(int argc, char **argv) {
    char const *error= 0;
    unsigned threads;
@@ -334,7 +357,22 @@ int main(int argc, char **argv) {
    if (argc < 3 || argc > 4) {
       bad_arguments:
       ERROR(
-         "Arguments: (write | verify) <password> [ <starting_byte_offset> ]"
+         "Invalid arguments!\n"
+         "\n"
+         "Arguments: (write | verify) <seed_file> [ <starting_offset> ]\n"
+         "\n"
+         "where\n"
+         "\n"
+         "'write': write PRNG stream to standard output\n"
+         "'verify': compare PRNG data against stream from standard input\n"
+         "<seed_file>: a binary (or text) file up to 256 bytes PRNG seed\n"
+         "<starting_offset>: byte offset where to start writing/verifying\n"
+         "\n"
+         "Standard input or output should be a block device or a file. When\n"
+         "writing to a file, writing stops when the file cannot grow any\n"
+         "more.\n"
+         "\n"
+         VERSION_INFO
       );
    }
    if (!strcmp(argv[1], "write")) tgs.read_mode= 0;
@@ -384,8 +422,7 @@ int main(int argc, char **argv) {
          bmask= nmask;
       }
    }
-   if (!*argv[2]) ERROR("Key must not be empty!");
-   pearnd_init(argv[2], strlen(argv[2]));
+   load_seed(&error, argv[2]); if (error) goto fail;
    if (argc == 4) {
       tgs.pos= atou64(&error, argv[3]); if (error) goto fail;
       if (tgs.pos % tgs.blksz) {

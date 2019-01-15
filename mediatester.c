@@ -71,6 +71,7 @@ static struct {
 #define CEIL_DIV(num, den) (((num) + (den) - 1) / (den))
 
 #define ERROR(msg) { error= msg; goto fail; }
+#define ERROR_CHECK() { if (error) goto fail; }
 
 static char const msg_exotic_error[]= {
    "Internal error! (This should normally never happen.)"
@@ -422,9 +423,9 @@ int main(int argc, char **argv) {
          bmask= nmask;
       }
    }
-   load_seed(&error, argv[2]); if (error) goto fail;
+   load_seed(&error, argv[2]); ERROR_CHECK();
    if (argc == 4) {
-      tgs.pos= atou64(&error, argv[3]); if (error) goto fail;
+      tgs.pos= atou64(&error, argv[3]); ERROR_CHECK();
       if (tgs.pos % tgs.blksz) {
          ERROR("Starting offset must be a multiple of the I/O block size!");
       }

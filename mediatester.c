@@ -7,13 +7,23 @@
  * data as quickly as possible in parallel, and double buffering is employed
  * to allow disk I/O to run (mostly) in parallel, too.
  *
- * Copyright (c) 2017 Guenther Brunthaler. All rights reserved.
+ * Version 2019.15
+ * Copyright (c) 2017-2019 Guenther Brunthaler. All rights reserved.
  *
  * This source file is free software.
  * Distribution is permitted under the terms of the GPLv3.  */
 
 #if !defined __STDC_VERSION__ || __STDC_VERSION__ < 199901
    #error "This source file requires a C99 compliant C compiler!"
+#endif
+
+#if defined(_FILE_OFFSET_BITS) && _FILE_OFFSET_BITS < 64
+   #undef _FILE_OFFSET_BITS
+#endif
+#ifndef _FILE_OFFSET_BITS
+   /* Feature-test macro which, if supported by the platform (such as glibc on
+    * 32-bit Linux), will make lseek() and off_t support 64 bit offsets. */
+   #define _FILE_OFFSET_BITS 64
 #endif
 
 #include <dim_sdbrke8ae851uitgzm4nv3ea2.h>
@@ -94,7 +104,71 @@ static void *thread_func(void *unused_dummy) {
          /* All worker segments have already been assigned to some thread. */
          if (tgs.active_threads == 1) {
             /* And we are the first/last thread running! Let's do I/O then. */
-            if (tgs.read_mode == 0) {
+            if (tgs.read_mode) {
+               #if 1
+                  ERROR("Verify mode has not been implemented yet!");
+               #else
+               uint8_t *in, *next;
+               size_t left;
+               /* Switch buffers so other threads can resume working. */
+               if (
+                     tgs.shared_buffer - (left= tgs.shared_buffer_size)
+                  == tgs.shared_buffers[0]
+               ) {
+                  next= tgs.shared_buffers[1];
+               } else {
+                  assert(tgs.shared_buffer - left == tgs.shared_buffers[1]);
+                  next= tgs.shared_buffers[0];
+               }
+               //tgs.shared_buffer_stop= tgs.shared_buffer + left;
+               have.workers_mutex_procured= 0;
+               if (pthread_mutex_unlock(&tgs.workers_mutex)) goto unlock_error;
+               /* Wake up other threads so they can start working on the other
+                * buffer. */
+               if (pthread_cond_broadcast(&tgs.workers_wakeup_call)) {
+                  goto wakeup_error;
+               }
+               /* Write the old buffer while the other threads already fill
+                * the new buffer. */
+               for (;;) {
+                  ssize_t written;
+                  if ((written= write(1, out, left)) <= 0) {
+                     if (written == 0) break;
+                     if (written != -1) goto unlikely_error;
+                     /* The write() has failed. Examine why. */
+                     switch (errno) {
+                        case ENOSPC: /* We filled up the filesystem. */
+                        case EPIPE: /* Output stream has ended. */
+                        case EDQUOT: /* Quota has been reached. */
+                        case EFBIG: /* Maximum output size reached. */
+                           /* Those are all considered "good" reasons why the
+                            * write() has failed. */
+                           assert(left > 0);
+                           goto finished;
+                        case EINTR: continue; /* Interrupted write(). */
+                     }
+                     ERROR(msg_write_error);
+                  }
+                  if ((size_t)written > left) goto unlikely_error;
+                  out+= (size_t)written;
+                  left-= (size_t)written;
+               }
+               finished:
+               if (pthread_mutex_lock(&tgs.workers_mutex)) goto lock_error;
+               have.workers_mutex_procured= 1;
+               if (left) {
+                  /* Output data sink does not accept any more data - we are
+                   * done. Initiate successful termination. */
+                  tgs.shutdown_requested= 1;
+                  /* Make sure any sleeping threads will wake up to learn
+                   * about the shutdown request. */
+                  if (pthread_cond_broadcast(&tgs.workers_wakeup_call)) {
+                     goto wakeup_error;
+                  }
+                  goto shutdown;
+               }
+               #endif
+            } else {
                /* In write mode, we switch the buffer first, and let then the
                 * other threads fill the next buffer while we write out the
                 * old buffer's contents. */
@@ -162,10 +236,6 @@ static void *thread_func(void *unused_dummy) {
                   }
                   goto shutdown;
                }
-            } else {
-               /* In verify mode, we first need to read the next buffer, and
-                * only then we can let the other threads verify its contents,
-                * while we already read the buffer after the next one. */
             }
          } else {
             assert(tgs.active_threads >= 2);

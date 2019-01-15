@@ -1,3 +1,5 @@
+.POSIX:
+
 OBJECTS = $(SOURCES:.c=.o)
 TARGETS = $(OBJECTS:.o=)
 LIBS = $(LIB_1_SUBDIR)/lib$(LIB_1_SUBDIR).a -lpthread

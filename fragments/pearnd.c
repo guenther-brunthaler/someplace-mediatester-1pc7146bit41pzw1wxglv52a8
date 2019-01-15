@@ -49,23 +49,32 @@ void pearnd_seek(pearnd_offset *po, uint_fast64_t pos) {
    po->limbs= i;
 }
 
-void pearnd_generate(void *dst, size_t count, pearnd_offset *po) {
-   uint8_t *out= dst;
-   uint8_t const *out_stop= (uint8_t const *)((char *)dst + count);
-   uint8_t *pos= po->pos, mac;
-   unsigned i, limbs= po->limbs, sum;
-   assert(limbs >= 1);
-   while (out != out_stop) {
-      i= 0; mac= UINT8_C(0);
-      do mac= sbox[mac ^ pos[i]]; while (++i != limbs);
-      *out++= mac;
-      for (i= 0; pos[i]= (uint8_t)(sum= pos[i] + 1u) , sum == 1u << 8; ) {
-         pos[i]= 0;
-         if (++i == limbs) {
-            pos[i]= 0;
-            po->limbs= limbs= i + 1;
-         }
-         assert(i < DIM(po->pos));
-      }
+#define PEAR_DO(output_stmt) \
+   uint8_t *out= dst; \
+   uint8_t const *out_stop= (uint8_t const *)((char *)dst + count); \
+   uint8_t *pos= po->pos, mac; \
+   unsigned i, limbs= po->limbs, sum; \
+   assert(limbs >= 1); \
+   while (out != out_stop) { \
+      i= 0; mac= UINT8_C(0); \
+      do mac= sbox[mac ^ pos[i]]; while (++i != limbs); \
+      output_stmt; \
+      for (i= 0; pos[i]= (uint8_t)(sum= pos[i] + 1u) , sum == 1u << 8; ) { \
+         pos[i]= 0; \
+         if (++i == limbs) { \
+            pos[i]= 0; \
+            po->limbs= limbs= i + 1; \
+         } \
+         assert(i < DIM(po->pos)); \
+      } \
    }
+
+void pearnd_generate(void *dst, size_t count, pearnd_offset *po) {
+   PEAR_DO(*out++= mac);
+}
+
+int pearnd_xor(void *dst, size_t count, pearnd_offset *po) {
+   uint8_t not_all_same= 0;
+   PEAR_DO(not_all_same|= *out++^= mac);
+   return not_all_same;
 }

@@ -33,4 +33,9 @@ void pearnd_seek(pearnd_offset *po, uint_fast64_t pos);
  * stream position. */
 void pearnd_generate(void *dst, size_t count, pearnd_offset *po);
 
+/* XOR buffer with the next <count> PRNG bytes, starting at the current stream
+ * position. Returns nonzero if any of the XOR operations resulted in a
+ * non-zero value. */
+int pearnd_xor(void *dst, size_t count, pearnd_offset *po);
+
 #endif /* !HEADER_ESM240BGRPZJZAJ61R9RMUV23_INCLUDED */

@@ -74,7 +74,7 @@ static struct {
 #define ERROR_CHECK() { if (error) goto fail; }
 
 static char const msg_exotic_error[]= {
-   "Internal error! (This should normally never happen.)"
+   "Unexpected error! (This should normally never happen.)"
 };
 
 static char const msg_write_error[]= {"Write error!"};

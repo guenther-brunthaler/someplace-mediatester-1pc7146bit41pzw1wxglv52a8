@@ -4,7 +4,7 @@
 re='[Vv]ersion 2[0-9]\{3\}[.][0-9]'
 for f in `git ls-files -m`
 do
-	if grep -q "$re"
+	if grep -q "$re" "$f"
 	then
 		:
 	else

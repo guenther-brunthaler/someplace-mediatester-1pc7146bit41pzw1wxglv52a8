@@ -8,7 +8,7 @@
  * to allow disk I/O to run (mostly) in parallel, too. */
 
 #define VERSION_INFO \
- "Version 2019.79\n" \
+ "Version 2019.79.1\n" \
  "Copyright (c) 2017-2019 Guenther Brunthaler. All rights reserved.\n" \
  "\n" \
  "This program is free software.\n" \
@@ -354,8 +354,19 @@ int main(int argc, char **argv) {
          "<starting_offset>: byte offset where to start writing/verifying\n"
          "\n"
          "Standard input or output should be a block device or a file. When\n"
-         "writing to a file, writing stops when the file cannot grow any\n"
-         "more.\n"
+         "writing to a file, writing stops when there is no more free space\n"
+         "left in the filesystem containing the file, or when the file has\n"
+         "reached the maximum file size supported by the filesystem.\n"
+         "\n"
+         "The <seed_file> determines which pseudo-random sequence of bytes\n"
+         "will be written to or will be expected to be read from the file\n"
+         "or device. The same <seed_file> needs to be used for a 'write'\n"
+         "command and its matching 'verify' command.\n"
+         "\n"
+         "The contents of <seed_file> are arbitrary and should preferably\n"
+         "be taken from /dev/random. The size of <seed_file> can be\n"
+         "anything from 1 byte to 256 bytes. The recommended size is 16\n"
+         "bytes.\n"
          "\n"
          VERSION_INFO
       );

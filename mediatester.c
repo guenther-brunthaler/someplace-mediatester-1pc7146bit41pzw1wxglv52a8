@@ -8,7 +8,7 @@
  * to allow disk I/O to run (mostly) in parallel, too. */
 
 #define VERSION_INFO \
- "Version 2019.78\n" \
+ "Version 2019.79\n" \
  "Copyright (c) 2017-2019 Guenther Brunthaler. All rights reserved.\n" \
  "\n" \
  "This program is free software.\n" \
@@ -422,6 +422,23 @@ int main(int argc, char **argv) {
       ) {
          ERROR("Could not reposition standard stream to starting position!");
       }
+      #ifndef NDEBUG
+         {
+            off_t pos;
+            if (
+               (
+                  pos= lseek(
+                        tgs.read_mode ? STDIN_FILENO : STDOUT_FILENO
+                     ,  (off_t)0, SEEK_CUR
+                  )
+               ) == (off_t)-1
+            ) {
+               ERROR("Could not determine standard stream position!");
+            }
+            assert(pos > 0);
+            assert((uint_fast64_t)pos == tgs.pos);
+         }
+      #endif
    } else {
       tgs.pos= 0;
    }
@@ -451,13 +468,15 @@ int main(int argc, char **argv) {
    if (
       fprintf(
             stderr
-         ,  "Starting output offset: %" PRIdFAST64 " bytes\n"
+         ,  "Starting %s offset: %" PRIdFAST64 " bytes\n"
             "Optimum device I/O block size: %u\n"
             "PRNG worker threads: %u\n"
             "worker's buffer segment size: %zu bytes\n"
             "number of worker segments: %zu\n"
             "size of buffer subdivided into worker segments: %zu bytes\n"
             "number of such buffers: %u\n"
+            "\n%s PRNG data %s...\n"
+         ,  tgs.read_mode ? "input" : "output"
          ,  tgs.pos
          ,  (unsigned)tgs.blksz
          ,  threads - 1
@@ -465,6 +484,8 @@ int main(int argc, char **argv) {
          ,  tgs.work_segments
          ,  tgs.shared_buffer_size
          ,  (unsigned)DIM(tgs.shared_buffers)
+         ,  tgs.read_mode ? "reading" : "writing"
+         ,  tgs.read_mode ? "from standard input" : "to standard output"
       ) <= 0
    ) {
       goto write_error;

@@ -8,7 +8,7 @@
  * to allow disk I/O to run (mostly) in parallel, too. */
 
 #define VERSION_INFO \
- "Version 2019.15.1\n" \
+ "Version 2019.78\n" \
  "Copyright (c) 2017-2019 Guenther Brunthaler. All rights reserved.\n" \
  "\n" \
  "This program is free software.\n" \
@@ -285,32 +285,16 @@ static void *thread_func(void *unused_dummy) {
 }
               
 static uint_fast64_t atou64(char const **error, char const *numeric) {
-   uint_fast64_t v= 0, nv;
-   unsigned digit, i;
-   for (i= 0; ; ++i) {
-      #define error *error
-         switch (numeric[i]) {
-            default: ERROR("Invalid decimal digit!");
-            case '\0':
-               if (i) return v;
-               ERROR("Decimal number without any digits!");
-            case '0': digit= 0; break;
-            case '1': digit= 1; break;
-            case '2': digit= 2; break;
-            case '3': digit= 3; break;
-            case '4': digit= 4; break;
-            case '5': digit= 5; break;
-            case '6': digit= 6; break;
-            case '7': digit= 7; break;
-            case '8': digit= 8; break;
-            case '9': digit= 9;
-         }
-         if ((nv= v * 10 + digit) < v) ERROR("Decimal number is too large!");
-      #undef error
-      v= nv;
+   uint_fast64_t result;
+   int converted;
+   if (
+         sscanf(numeric, "%" SCNuFAST64 "%n", &result, &converted) != 1
+      || (size_t)converted != strlen(numeric)
+   ) {
+      *error= "Invalid number!";
+      return ~UINT64_C(0) / 3;  /* Should not be used at all by caller! */
    }
-   fail:
-   return ~UINT64_C(0) / 3;  /* Should not be used at all by caller! */
+   return result;
 }
 
 static void load_seed(char const **error, char const *seed_file) {
@@ -430,7 +414,12 @@ int main(int argc, char **argv) {
          ERROR("Starting offset must be a multiple of the I/O block size!");
       }
       if ((off_t)tgs.pos < 0) ERROR("Numeric overflow in offset!");
-      if (lseek(!!tgs.read_mode, (off_t)tgs.pos, SEEK_SET) == (off_t)-1) {
+      if (
+         lseek(
+               tgs.read_mode ? STDIN_FILENO : STDOUT_FILENO
+            ,  (off_t)tgs.pos, SEEK_SET
+         ) == (off_t)-1
+      ) {
          ERROR("Could not reposition standard stream to starting position!");
       }
    } else {

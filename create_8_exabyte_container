@@ -1,0 +1,186 @@
+#! /bin/sh
+
+# Create a RAM-backed block device using the size specified in the script name
+# (which can be a symlink) or the size specified by the -n option (which
+# overrides the size from the script name).
+#
+# The block device consists of a count of virtual zero-bytes corresponding to
+# the specified device size, followed by 512 bytes of actual (non-virtual)
+# device data.
+#
+# The new block device will be owner by the user invoking the script.
+#
+# On successful device creation, the pathname of the block device and
+# instructions for its removal will be displayed.
+#
+# The script (or symlink) file name should match the shell filename pattern
+# *create_$SIZESPEC* or just $SIZESPEC*, where $SIZESPEC is something like
+# "8_kilobyte", "4_kibibyte", "100_yobibyte", "8_exabyte" or "7_exbibyte".
+#
+# Only byte sizes which can be expressed by "expr" will be recognized, though.
+#
+# Instead of the underscore ("_") character as shown above, any other
+# non-alphanumeric character can be used as separator character in the
+# filename/$SIZESPEC patterns was well.
+#
+# Some examples of valid names for this script (or symlinks) to it:
+#
+# ./create_100_petabyte_container
+# ./64-kibibytes
+# ./create-99_gigabytes-as-a-container
+# ./"create 96 terabyte block-device"
+# ./"1024 bytes-device"
+#
+# The same names can be passed via the -n option to override the script's
+# actual file (or symlink) name.
+#
+# It the -s option is passed to the script, it just displays the effective
+# size extracted from the script name (or -n) option and exits without
+# actually trying to create any block device.
+#
+# Version 2019.79
+#
+# Copyright (c) 2019 Guenther Brunthaler. All rights reserved.
+#
+# This script is free software.
+# Distribution is permitted under the terms of the GPLv3.
+
+set -e
+
+cleanup() {
+	rc=$?
+	test "$loop" && losetup -d "$loop"
+	test "$backing" && rm -- "$backing"
+	test $rc = 0 || echo "\"$0\" failed!" >& 2
+}
+
+trap cleanup 0
+backing=
+loop=
+trap 'exit $?' INT TERM QUIT HUP
+
+me=$0
+case $me in
+	/* | ./*) ;;
+	*)
+		if test -e "$me"
+		then
+			me=./$me
+		else
+			me=`command -v -- "$me"`
+			test -e "$me"
+		fi
+esac
+me=`readlink -f -- "$me"`
+test -f "$me"
+
+uid=`id -u`
+if test $uid != 0
+then
+	command -v sudo > /dev/null 2>& 1 \
+	&& exec sudo "$me" -n "$0" -u $uid ${1+"$@"}
+	echo "Please install 'sudo' or run this command as the superuser!" >& 2
+	false || exit
+fi
+
+chowner=
+name=`basename -- "$0"`
+just_show=false
+just_remove=false
+while getopts n:su:r opt
+do
+	case $opt in
+		u) chowner=$OPTARG;;
+		s) just_show=true;;
+		r) just_remove=true;;
+		n) name=$OPTARG;;
+		*) false || exit
+	esac
+done
+shift `expr $OPTIND - 1 || :`
+
+test $# = 0
+
+mapping=`printf '%s\n' "$name" | sed 's/[^[:alnum:]]/_/g; s/__*/_/g'`
+mapping=${mapping#*create_}
+unit=${mapping#*_}
+quantity=${mapping%"_$unit"}
+unit=${unit%byte*}
+multiplier=1000
+prefix_bytes=$quantity
+for u in \
+	"" kilo mega giga tera peta exa zetta yotta \
+	-bi kibi mebi gibi tebi pebi exbi zebi yobi -fail
+do
+	case $u in
+		"$unit") break;;
+		-fail) false;;
+		-bi) multiplier=1024; prefix_bytes=$quantity
+	esac
+	nx=`expr $prefix_bytes \* $multiplier 2> /dev/null` || continue
+	test $nx -gt $prefix_bytes
+	prefix_bytes=$nx
+done
+
+prefix_sectors=`expr $prefix_bytes / 512`
+test `expr $prefix_sectors \* 512` = $prefix_bytes || {
+	echo "The selected device prefix size of $prefix_bytes virtual" \
+	"zero-bytes is not a multiple of 512 bytes as required!" >& 2
+	false || exit
+}
+
+if $just_show
+then
+	echo "Parsed virtual zero-byte prefix device size (in bytes):"
+	echo $prefix_bytes
+	exit
+fi
+
+if $just_remove
+then
+	echo "Executing:"
+	(set -x; dmsetup remove "$mapping")
+	exit
+fi
+
+for m in zero linear
+do
+	modprobe $m || :
+done 2> /dev/null
+
+backing=`mktemp -- "${TMPDIR:-/tmp}/${0##*/}.XXXXXXXXXX"`
+
+dd if=/dev/zero bs=512 count=1 > "$backing" 2> /dev/null
+
+loop0=`losetup -f`
+test -b "$loop0"
+losetup "$loop0" "$backing"
+loop=$loop0; unset loop0
+
+rm -- "$backing"; backing=
+
+{
+	echo 0 $prefix_sectors zero
+	echo $prefix_sectors 1 linear $loop 0
+} | dmsetup create $mapping
+
+losetup -d "$loop"; loop=
+
+dev=/dev/mapper/$mapping
+wait=5
+while test ! -b "$dev"
+do
+	test $wait = 2 && dmsetup mknodes
+	sleep 1
+	wait=`expr $wait - 1`
+done
+
+test "$chowner" && chown "$chowner" "$dev"
+
+(set -x; ls -lL "$dev")
+echo
+(set -x; blockdev --getsize64 "$dev")
+echo
+cat << EOF
+Run script again with -r (or use dmsetup remove) to destroy the new device.
+EOF

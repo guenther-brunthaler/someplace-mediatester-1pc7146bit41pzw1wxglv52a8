@@ -10,7 +10,7 @@ do
 	else
 		continue
 	fi
-	if git diff "$f" | grep -q "^- $re"
+	if git diff "$f" | grep -q "^+ .*$re"
 	then
 		:
 	else

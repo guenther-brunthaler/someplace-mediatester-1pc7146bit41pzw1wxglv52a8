@@ -1,0 +1,13 @@
+#! /bin/sh
+
+f=mediatester.c
+if git ls-files -m | grep -Fxq "$f"
+then
+	if git diff "$f" | grep -q '^- "Version '
+	then
+		:
+	else
+		echo "Bump the revision of $f before checking in!" >& 2
+		false || exit
+	fi
+fi

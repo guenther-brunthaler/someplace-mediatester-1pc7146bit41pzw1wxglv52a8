@@ -62,7 +62,11 @@ static struct {
    size_t work_segments;
    size_t work_segment_sz;
    size_t shared_buffer_size;
-   uint_fast64_t pos;
+   uint_fast64_t pos; /* Current position. */
+   uint_fast64_t start_pos; /* Initial starting offset. */
+   uint_fast64_t first_error_pos; /* Only valid if num_errors != 0. */
+   uint_fast64_t last_error_pos; /* Only valid if num_errors != 0. */
+   uint_fast64_t num_errors; /* Count of differing bytes. */
    unsigned active_threads /* = 0; */;
    pthread_mutex_t workers_mutex;
    pthread_cond_t workers_wakeup_call;
@@ -399,6 +403,13 @@ int main(int argc, char **argv) {
             }
             if ((size_t)physical > tgs.blksz) tgs.blksz= (size_t)physical;
          }
+         {
+            long optimal;
+            if (ioctl(fd, BLKIOOPT, &optimal) < 0) {
+               ERROR("Unable to determine optimal sector size!");
+            }
+            if ((size_t)optimal > tgs.blksz) tgs.blksz= (size_t)optimal;
+         }
       } else {
          /* Some other kind of data source/sink. Assume the maximum of the MMU
           * page size, the atomic pipe size and the fallback value. */
@@ -410,13 +421,14 @@ int main(int argc, char **argv) {
    }
    {
       size_t bmask= 512; /* <blksz> must be a power of 2 >= this value. */
-      while (tgs.blksz ^ bmask) {
+      while (bmask < tgs.blksz) {
          size_t nmask;
          if (!((nmask= bmask + bmask) > bmask)) {
             ERROR("Could not determine a suitable I/O block size");
          }
          bmask= nmask;
       }
+      tgs.blksz= bmask;
    }
    load_seed(&error, argv[2]); ERROR_CHECK();
    if (argc == 4) {

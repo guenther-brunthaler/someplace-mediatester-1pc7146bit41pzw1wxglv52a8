@@ -87,10 +87,7 @@ static char const msg_exotic_error[]= {
 
 static char const msg_write_error[]= {"Write error!"};
 
-/* We *could* pass &tgs as the argument, but there is no point because there
- * exists only one such instance anyway. Also, accessing global variables is
- * typically faster than accessing variables indirectly via a pointer. */
-static void *thread_func(void *unused_dummy) {
+static void *writer_thread(void *unused_dummy) {
    char const *error, *first_error= 0;
    struct { unsigned workers_mutex_procured; } have= {0};
    (void)unused_dummy;
@@ -113,140 +110,206 @@ static void *thread_func(void *unused_dummy) {
       if (tgs.shared_buffer == tgs.shared_buffer_stop) {
          /* All worker segments have already been assigned to some thread. */
          if (tgs.active_threads == 1) {
-            /* And we are the first/last thread running! Let's do I/O then. */
-            if (tgs.mode != mode_write) {
-               #if 1
-                  ERROR("Verify mode has not been implemented yet!");
-               #else
-               uint8_t *in, *next;
-               size_t left;
-               /* Switch buffers so other threads can resume working. */
-               if (
-                     tgs.shared_buffer - (left= tgs.shared_buffer_size)
-                  == tgs.shared_buffers[0]
-               ) {
-                  next= tgs.shared_buffers[1];
-               } else {
-                  assert(tgs.shared_buffer - left == tgs.shared_buffers[1]);
-                  next= tgs.shared_buffers[0];
+            /* And we are the first/last thread running! Let's do I/O then. We
+             * switch the buffer first, and let then the other threads fill
+             * the next buffer while we write out the old buffer's
+             * contents. */
+            uint8_t const *out;
+            size_t left;
+            /* Switch buffers so other threads can resume working. */
+            if (
+                  tgs.shared_buffer - (left= tgs.shared_buffer_size)
+               == tgs.shared_buffers[0]
+            ) {
+               out= tgs.shared_buffers[0];
+               tgs.shared_buffer= tgs.shared_buffers[1];
+            } else {
+               out= tgs.shared_buffers[1];
+               assert(tgs.shared_buffer - left == out);
+               tgs.shared_buffer= tgs.shared_buffers[0];
+            }
+            tgs.shared_buffer_stop= tgs.shared_buffer + left;
+            have.workers_mutex_procured= 0;
+            if (pthread_mutex_unlock(&tgs.workers_mutex)) goto unlock_error;
+            /* Wake up other threads so they can start working on the other
+             * buffer. */
+            if (pthread_cond_broadcast(&tgs.workers_wakeup_call)) {
+               wakeup_error:
+               ERROR("Could not wake up worker threads!");
+            }
+            /* Write the old buffer while the other threads already fill
+             * the new buffer. */
+            for (;;) {
+               ssize_t written;
+               if ((written= write(1, out, left)) <= 0) {
+                  if (written == 0) break;
+                  if (written != -1) {
+                     unlikely_error: ERROR(msg_exotic_error);
+                  }
+                  /* The write() has failed. Examine why. */
+                  switch (errno) {
+                     case ENOSPC: /* We filled up the filesystem. */
+                     case EPIPE: /* Output stream has ended. */
+                     case EDQUOT: /* Quota has been reached. */
+                     case EFBIG: /* Maximum output size reached. */
+                        /* Those are all considered "good" reasons why the
+                         * write() has failed. */
+                        assert(left > 0);
+                        goto finished;
+                     case EINTR: continue; /* Interrupted write(). */
+                  }
+                  ERROR(msg_write_error);
                }
-               //tgs.shared_buffer_stop= tgs.shared_buffer + left;
-               have.workers_mutex_procured= 0;
-               if (pthread_mutex_unlock(&tgs.workers_mutex)) goto unlock_error;
-               /* Wake up other threads so they can start working on the other
-                * buffer. */
+               if ((size_t)written > left) goto unlikely_error;
+               out+= (size_t)written;
+               left-= (size_t)written;
+            }
+            finished:
+            if (pthread_mutex_lock(&tgs.workers_mutex)) goto lock_error;
+            have.workers_mutex_procured= 1;
+            if (left) {
+               /* Output data sink does not accept any more data - we are
+                * done. Initiate successful termination. */
+               tgs.shutdown_requested= 1;
+               /* Make sure any sleeping threads will wake up to learn
+                * about the shutdown request. */
                if (pthread_cond_broadcast(&tgs.workers_wakeup_call)) {
                   goto wakeup_error;
                }
-               /* Write the old buffer while the other threads already fill
-                * the new buffer. */
-               for (;;) {
-                  ssize_t written;
-                  if ((written= write(1, out, left)) <= 0) {
-                     if (written == 0) break;
-                     if (written != -1) goto unlikely_error;
-                     /* The write() has failed. Examine why. */
-                     switch (errno) {
-                        case ENOSPC: /* We filled up the filesystem. */
-                        case EPIPE: /* Output stream has ended. */
-                        case EDQUOT: /* Quota has been reached. */
-                        case EFBIG: /* Maximum output size reached. */
-                           /* Those are all considered "good" reasons why the
-                            * write() has failed. */
-                           assert(left > 0);
-                           goto finished;
-                        case EINTR: continue; /* Interrupted write(). */
-                     }
-                     ERROR(msg_write_error);
-                  }
-                  if ((size_t)written > left) goto unlikely_error;
-                  out+= (size_t)written;
-                  left-= (size_t)written;
-               }
-               finished:
-               if (pthread_mutex_lock(&tgs.workers_mutex)) goto lock_error;
-               have.workers_mutex_procured= 1;
-               if (left) {
-                  /* Output data sink does not accept any more data - we are
-                   * done. Initiate successful termination. */
-                  tgs.shutdown_requested= 1;
-                  /* Make sure any sleeping threads will wake up to learn
-                   * about the shutdown request. */
-                  if (pthread_cond_broadcast(&tgs.workers_wakeup_call)) {
-                     goto wakeup_error;
-                  }
-                  goto shutdown;
-               }
-               #endif
-            } else {
-               /* In write mode, we switch the buffer first, and let then the
-                * other threads fill the next buffer while we write out the
-                * old buffer's contents. */
-               uint8_t const *out;
-               size_t left;
-               /* Switch buffers so other threads can resume working. */
-               if (
-                     tgs.shared_buffer - (left= tgs.shared_buffer_size)
-                  == tgs.shared_buffers[0]
-               ) {
-                  out= tgs.shared_buffers[0];
-                  tgs.shared_buffer= tgs.shared_buffers[1];
-               } else {
-                  out= tgs.shared_buffers[1];
-                  assert(tgs.shared_buffer - left == out);
-                  tgs.shared_buffer= tgs.shared_buffers[0];
-               }
-               tgs.shared_buffer_stop= tgs.shared_buffer + left;
-               have.workers_mutex_procured= 0;
-               if (pthread_mutex_unlock(&tgs.workers_mutex)) goto unlock_error;
-               /* Wake up other threads so they can start working on the other
-                * buffer. */
-               if (pthread_cond_broadcast(&tgs.workers_wakeup_call)) {
-                  wakeup_error:
-                  ERROR("Could not wake up worker threads!");
-               }
-               /* Write the old buffer while the other threads already fill
-                * the new buffer. */
-               for (;;) {
-                  ssize_t written;
-                  if ((written= write(1, out, left)) <= 0) {
-                     if (written == 0) break;
-                     if (written != -1) {
-                        unlikely_error: ERROR(msg_exotic_error);
-                     }
-                     /* The write() has failed. Examine why. */
-                     switch (errno) {
-                        case ENOSPC: /* We filled up the filesystem. */
-                        case EPIPE: /* Output stream has ended. */
-                        case EDQUOT: /* Quota has been reached. */
-                        case EFBIG: /* Maximum output size reached. */
-                           /* Those are all considered "good" reasons why the
-                            * write() has failed. */
-                           assert(left > 0);
-                           goto finished;
-                        case EINTR: continue; /* Interrupted write(). */
-                     }
-                     ERROR(msg_write_error);
-                  }
-                  if ((size_t)written > left) goto unlikely_error;
-                  out+= (size_t)written;
-                  left-= (size_t)written;
-               }
-               finished:
-               if (pthread_mutex_lock(&tgs.workers_mutex)) goto lock_error;
-               have.workers_mutex_procured= 1;
-               if (left) {
-                  /* Output data sink does not accept any more data - we are
-                   * done. Initiate successful termination. */
-                  tgs.shutdown_requested= 1;
-                  /* Make sure any sleeping threads will wake up to learn
-                   * about the shutdown request. */
-                  if (pthread_cond_broadcast(&tgs.workers_wakeup_call)) {
-                     goto wakeup_error;
-                  }
-                  goto shutdown;
-               }
+               goto shutdown;
             }
+         } else {
+            assert(tgs.active_threads >= 2);
+            /* We have nothing to do, but other worker threads are still
+             * active. Just wait until there is again possibly something to
+             * do. */
+            --tgs.active_threads;
+            have.workers_mutex_procured= 0;
+            if (
+               pthread_cond_wait(&tgs.workers_wakeup_call, &tgs.workers_mutex)
+            ) {
+               ERROR("Could not wait for condition variable!");
+            }
+            have.workers_mutex_procured= 1;
+            ++tgs.active_threads;
+         }
+      } else {
+         /* There is more work to do. Seize the next work segment. */
+         pearnd_offset po;
+         uint8_t *work_segment= tgs.shared_buffer;
+         tgs.shared_buffer+= tgs.work_segment_sz;
+         pearnd_seek(&po, tgs.pos);
+         tgs.pos+= tgs.work_segment_sz;
+         /* Allow other threads to seize work segments as well. */
+         have.workers_mutex_procured= 0;
+         if (pthread_mutex_unlock(&tgs.workers_mutex)) goto unlock_error;
+         /* Do every worker thread's primary job: Process its work segment. */
+         pearnd_generate(work_segment, tgs.work_segment_sz, &po);
+         /* See whether we can get the next job. */
+         if (pthread_mutex_lock(&tgs.workers_mutex)) goto lock_error;
+         have.workers_mutex_procured= 1;
+      }
+   }
+   fail:
+   if (!first_error) first_error= error;
+   cleanup:
+   if (have.workers_mutex_procured) {
+      have.workers_mutex_procured= 0;
+      if (pthread_mutex_unlock(&tgs.workers_mutex)) {
+         unlock_error:
+         ERROR("Could not unlock mutex!");
+      }
+   }
+   return (void *)first_error;
+}
+
+static void *reader_thread(void *unused_dummy) {
+   char const *error, *first_error= 0;
+   struct { unsigned workers_mutex_procured; } have= {0};
+   (void)unused_dummy;
+   /* Lock the mutex before acessing the global work state variables. */
+   if (pthread_mutex_lock(&tgs.workers_mutex)) {
+      lock_error:
+      ERROR("Could not lock mutex!");
+   }
+   have.workers_mutex_procured= 1;
+   ++tgs.active_threads; /* We just woke up (or have started). */
+   /* Thread main loop. */
+   for (;;) {
+      assert(have.workers_mutex_procured);
+      assert(tgs.active_threads >= 1);
+      if (tgs.shutdown_requested) {
+         /*shutdown:*/
+         --tgs.active_threads;
+         goto cleanup;
+      }
+      if (tgs.shared_buffer == tgs.shared_buffer_stop) {
+         /* All worker segments have already been assigned to some thread. */
+         if (tgs.active_threads == 1) {
+            /* And we are the first/last thread running! Let's do I/O then. */
+            #if 1
+               ERROR("Verify mode has not been implemented yet!");
+            #else
+            uint8_t *in, *next;
+            size_t left;
+            /* Switch buffers so other threads can resume working. */
+            if (
+                  tgs.shared_buffer - (left= tgs.shared_buffer_size)
+               == tgs.shared_buffers[0]
+            ) {
+               next= tgs.shared_buffers[1];
+            } else {
+               assert(tgs.shared_buffer - left == tgs.shared_buffers[1]);
+               next= tgs.shared_buffers[0];
+            }
+            //tgs.shared_buffer_stop= tgs.shared_buffer + left;
+            have.workers_mutex_procured= 0;
+            if (pthread_mutex_unlock(&tgs.workers_mutex)) goto unlock_error;
+            /* Wake up other threads so they can start working on the other
+             * buffer. */
+            if (pthread_cond_broadcast(&tgs.workers_wakeup_call)) {
+               goto wakeup_error;
+            }
+            /* Write the old buffer while the other threads already fill
+             * the new buffer. */
+            for (;;) {
+               ssize_t written;
+               if ((written= write(1, out, left)) <= 0) {
+                  if (written == 0) break;
+                  if (written != -1) goto unlikely_error;
+                  /* The write() has failed. Examine why. */
+                  switch (errno) {
+                     case ENOSPC: /* We filled up the filesystem. */
+                     case EPIPE: /* Output stream has ended. */
+                     case EDQUOT: /* Quota has been reached. */
+                     case EFBIG: /* Maximum output size reached. */
+                        /* Those are all considered "good" reasons why the
+                         * write() has failed. */
+                        assert(left > 0);
+                        goto finished;
+                     case EINTR: continue; /* Interrupted write(). */
+                  }
+                  ERROR(msg_write_error);
+               }
+               if ((size_t)written > left) goto unlikely_error;
+               out+= (size_t)written;
+               left-= (size_t)written;
+            }
+            finished:
+            if (pthread_mutex_lock(&tgs.workers_mutex)) goto lock_error;
+            have.workers_mutex_procured= 1;
+            if (left) {
+               /* Output data sink does not accept any more data - we are
+                * done. Initiate successful termination. */
+               tgs.shutdown_requested= 1;
+               /* Make sure any sleeping threads will wake up to learn
+                * about the shutdown request. */
+               if (pthread_cond_broadcast(&tgs.workers_wakeup_call)) {
+                  goto wakeup_error;
+               }
+               goto shutdown;
+            }
+            #endif
          } else {
             assert(tgs.active_threads >= 2);
             /* We have nothing to do, but other worker threads are still
@@ -600,7 +663,13 @@ int main(int argc, char **argv) {
    {
       unsigned i;
       for (i= threads; i--; ) {
-         if (pthread_create(&tid[i], 0, &thread_func, 0)) {
+         if (
+            pthread_create(
+                  &tid[i], 0
+               ,  tgs.mode == mode_write ? & writer_thread : &reader_thread
+               ,  0
+            )
+         ) {
             ERROR("Could not create worker thread!\n");
          }
          tvalid[i]= 1;

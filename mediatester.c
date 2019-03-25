@@ -8,7 +8,7 @@
  * to allow disk I/O to run (mostly) in parallel, too. */
 
 #define VERSION_INFO \
- "Version 2019.79.1\n" \
+ "Version  2019.84\n" \
  "Copyright (c) 2017-2019 Guenther Brunthaler. All rights reserved.\n" \
  "\n" \
  "This program is free software.\n" \
@@ -54,8 +54,12 @@
 /* TWO such buffers will be allocated. */
 #define APPROXIMATE_BUFFER_SIZE (16ul << 20)
 
+
 static struct {
-   int read_mode, shutdown_requested /* = 0; */;
+   enum {
+      mode_write, mode_verify, mode_compare
+   } mode;
+   int shutdown_requested /* = 0; */;
    uint8_t *shared_buffer, *shared_buffers[2];
    uint8_t const *shared_buffer_stop;
    size_t blksz /* = 0; */;
@@ -110,7 +114,7 @@ static void *thread_func(void *unused_dummy) {
          /* All worker segments have already been assigned to some thread. */
          if (tgs.active_threads == 1) {
             /* And we are the first/last thread running! Let's do I/O then. */
-            if (tgs.read_mode) {
+            if (tgs.mode != mode_write) {
                #if 1
                   ERROR("Verify mode has not been implemented yet!");
                #else
@@ -417,8 +421,9 @@ int main(int argc, char **argv) {
          VERSION_INFO
       );
    }
-   if (!strcmp(argv[1], "write")) tgs.read_mode= 0;
-   else if (!strcmp(argv[1], "verify")) tgs.read_mode= 1;
+   if (!strcmp(argv[1], "write")) tgs.mode= mode_write;
+   else if (!strcmp(argv[1], "verify")) tgs.mode= mode_verify;
+   else if (!strcmp(argv[1], "compare")) tgs.mode= mode_compare;
    else goto bad_arguments;
    /* Determine the best I/O block size, defaulting the value preset
     * earlier. */
@@ -426,7 +431,9 @@ int main(int argc, char **argv) {
       struct stat st;
       int fd;
       mode_t mode;
-      if (fstat(fd= !tgs.read_mode, &st)) {
+      if (
+         fstat(fd= tgs.mode != mode_write ? STDIN_FILENO : STDOUT_FILENO, &st)
+      ) {
          ERROR("Cannot examine file descriptor to be used for I/O!");
       }
       if (S_ISBLK(mode= st.st_mode)) {
@@ -451,6 +458,9 @@ int main(int argc, char **argv) {
                ERROR("Unable to determine optimal sector size!");
             }
             if ((size_t)optimal > tgs.blksz) tgs.blksz= (size_t)optimal;
+         }
+         if (tgs.mode != mode_write && ioctl(fd, BLKFLSBUF) < 0) {
+             ERROR("Unable to flush device buffer before starting operation!");
          }
       } else {
          /* Some other kind of data source/sink. Assume the maximum of the MMU
@@ -481,7 +491,7 @@ int main(int argc, char **argv) {
       if ((off_t)tgs.pos < 0) ERROR("Numeric overflow in offset!");
       if (
          lseek(
-               tgs.read_mode ? STDIN_FILENO : STDOUT_FILENO
+               tgs.mode != mode_write ? STDIN_FILENO : STDOUT_FILENO
             ,  (off_t)tgs.pos, SEEK_SET
          ) == (off_t)-1
       ) {
@@ -493,7 +503,7 @@ int main(int argc, char **argv) {
             if (
                (
                   pos= lseek(
-                        tgs.read_mode ? STDIN_FILENO : STDOUT_FILENO
+                        tgs.mode != mode_write ? STDIN_FILENO : STDOUT_FILENO
                      ,  (off_t)0, SEEK_CUR
                   )
                ) == (off_t)-1
@@ -541,7 +551,7 @@ int main(int argc, char **argv) {
             "size of buffer subdivided into worker segments: %zu bytes\n"
             "number of such buffers: %u\n"
             "\n%s PRNG data %s...\n"
-         ,  tgs.read_mode ? "input" : "output"
+         ,  tgs.mode != mode_write ? "input" : "output"
          ,  tgs.pos
          ,  (unsigned)tgs.blksz
          ,  threads - 1
@@ -549,8 +559,10 @@ int main(int argc, char **argv) {
          ,  tgs.work_segments
          ,  tgs.shared_buffer_size
          ,  (unsigned)DIM(tgs.shared_buffers)
-         ,  tgs.read_mode ? "reading" : "writing"
-         ,  tgs.read_mode ? "from standard input" : "to standard output"
+         ,  tgs.mode != mode_write ? "reading" : "writing"
+         ,  tgs.mode != mode_write
+            ? "from standard input"
+            : "to standard output"
       ) <= 0
    ) {
       goto write_error;
@@ -575,7 +587,9 @@ int main(int argc, char **argv) {
    ;
    /* In verify mode, we start with a "finished" buffer, forcing the next
     * buffer to be read as the first worker thread action. */
-   if (tgs.read_mode) tgs.shared_buffer= (void *)tgs.shared_buffer_stop;
+   if (tgs.mode != mode_write) {
+      tgs.shared_buffer= (void *)tgs.shared_buffer_stop;
+   }
    if (!(tid= calloc(threads, sizeof *tid))) {
       malloc_error:
       ERROR("Memory allocation failure!");

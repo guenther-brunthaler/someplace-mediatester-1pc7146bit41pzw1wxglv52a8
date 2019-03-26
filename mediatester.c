@@ -8,7 +8,7 @@
  * to allow disk I/O to run (mostly) in parallel, too. */
 
 #define VERSION_INFO \
- "Version  2019.84\n" \
+ "Version 2019.85\n" \
  "Copyright (c) 2017-2019 Guenther Brunthaler. All rights reserved.\n" \
  "\n" \
  "This program is free software.\n" \
@@ -390,6 +390,83 @@ static void load_seed(char const **error, char const *seed_file) {
    #undef error
 }
 
+static char const usage[]=
+   "Invalid arguments!\n"
+   "\n"
+   "Usage: %s [ <options> ... ] <mode> <seed_file> [ <starting_offset> ]\n"
+   "\n"
+   "where\n"
+   "\n"
+   "<mode>: One of the following commands\n"
+   "  write - write PRNG stream to standard output at offset\n"
+   "  verify - compare PRNG data against stream from standard input\n"
+   "  compare - Like verify but show every byte ('should' and 'is')\n"
+   "<seed_file>: a binary (or text) file up to 256 bytes PRNG seed\n"
+   "<starting_offset>: byte offset where to start writing/verifying\n"
+   "\n"
+   "Standard input or output should be a block device or a file. When\n"
+   "writing to a file, writing stops when there is no more free space\n"
+   "left in the filesystem containing the file, or when the file has\n"
+   "reached the maximum file size supported by the filesystem.\n"
+   "\n"
+   "The <seed_file> determines which pseudo-random sequence of bytes\n"
+   "will be written to or will be expected to be read from the file\n"
+   "or device. The same <seed_file> needs to be used for a 'write'\n"
+   "command and its matching 'verify' command.\n"
+   "\n"
+   "The contents of <seed_file> are arbitrary and should be created\n"
+   "by something like this:\n"
+   "\n"
+   "$ dd if=/dev/random bs=1 count=16 > my_seed_file.bin\n"
+   "\n"
+   "<options>:\n"
+   "\n"
+   "-t <n>: Use <n> CPU threads for write/verify commands instead of\n"
+   "the autodetected number of available processor cores\n"
+   "\n"
+   "General usage procedure:\n"
+   "\n"
+   "1. Generate a seed file to be used with all following steps\n"
+   "\n"
+   "2. Fill the block device to be tested using the 'write' command\n"
+   "\n"
+   "   'write' can also fill a filesystem, using up all space. This\n"
+   "   allows to check how much uncompressible data can really be\n"
+   "   stored there, and whether the file has actually been written\n"
+   "   correctly (i. e. whether the filesystem works as it should).\n"
+   "\n"
+   "3. Use 'verify' command to check for differences\n"
+   "\n"
+   "   This reads back the data which has been written before and\n"
+   "   checks whether it is still the same. This should be the case\n"
+   "   if everything is fine.\n"
+   "   \n"
+   "   If it is not, 'verify' stops and reports the offset where the\n"
+   "   first different byte was detected.\n"
+   "   \n"
+   "   Differences mean that the storage medium or filesystem either\n"
+   "   does not reliably write data, or it does not reliably read\n"
+   "   data, or it is lying about its supposed storage capacity.\n"
+   "   Either way, such differences are always a bad sign.\n"
+   "   \n"
+   "   To scan for more differences, you can run the 'verify' command\n"
+   "   again, starting at a higher byte offset.\n"
+   "\n"
+   "4. If 'verify' stopped at differences, use 'compare' to show them\n"
+   "\n"
+   "   For every byte offset, 'compare' shows the byte value which\n"
+   "   was expected, the byte value actually read back, the ASCII\n"
+   "   character corresponding to the value read back, and the bit\n"
+   "   differences (XOR) between both bytes.\n"
+   "   \n"
+   "   'compare' does not stop output by itself before the end of the\n"
+   "   file/device has been reached. Its output should therefore be\n"
+   "   piped through 'head' or 'more' in order to limit the number of\n"
+   "   lines displayed.\n"
+   "\n"
+   VERSION_INFO
+;
+
 int main(int argc, char **argv) {
    char const *error= 0;
    unsigned threads;
@@ -411,83 +488,25 @@ int main(int argc, char **argv) {
    have.workers_wakeup_call= 1;
    /* Process arguments. */
    if (argc < 3 || argc > 4) {
+      struct stat st;
       bad_arguments:
-      ERROR(
-         "Invalid arguments!\n"
-         "\n"
-         "Arguments: <mode> <seed_file> [ <starting_offset> ]\n"
-         "\n"
-         "where\n"
-         "\n"
-         "<mode>: One of the following commands\n"
-         "  write - write PRNG stream to standard output at offset\n"
-         "  verify - compare PRNG data against stream from standard input\n"
-         "  compare - Like verify but show every byte ('should' and 'is')\n"
-         "<seed_file>: a binary (or text) file up to 256 bytes PRNG seed\n"
-         "<starting_offset>: byte offset where to start writing/verifying\n"
-         "\n"
-         "Standard input or output should be a block device or a file. When\n"
-         "writing to a file, writing stops when there is no more free space\n"
-         "left in the filesystem containing the file, or when the file has\n"
-         "reached the maximum file size supported by the filesystem.\n"
-         "\n"
-         "The <seed_file> determines which pseudo-random sequence of bytes\n"
-         "will be written to or will be expected to be read from the file\n"
-         "or device. The same <seed_file> needs to be used for a 'write'\n"
-         "command and its matching 'verify' command.\n"
-         "\n"
-         "The contents of <seed_file> are arbitrary and should be created\n"
-         "by something like this:\n"
-         "\n"
-         "$ dd if=/dev/random bs=1 count=16 > my_seed_file.bin\n"
-         "\n"
-         "General usage procedure:\n"
-         "\n"
-         "1. Generate a seed file to be used with all following steps\n"
-         "\n"
-         "2. Fill the block device to be tested using the 'write' command\n"
-         "\n"
-         "   'write' can also fill a filesystem, using up all space. This\n"
-         "   allows to check how much uncompressible data can really be\n"
-         "   stored there, and whether the file has actually been written\n"
-         "   correctly (i. e. whether the filesystem works as it should).\n"
-         "\n"
-         "3. Use 'verify' command to check for differences\n"
-         "\n"
-         "   This reads back the data which has been written before and\n"
-         "   checks whether it is still the same. This should be the case\n"
-         "   if everything is fine.\n"
-         "   \n"
-         "   If it is not, 'verify' stops and reports the offset where the\n"
-         "   first different byte was detected.\n"
-         "   \n"
-         "   Differences mean that the storage medium or filesystem either\n"
-         "   does not reliably write data, or it does not reliably read\n"
-         "   data, or it is lying about its supposed storage capacity.\n"
-         "   Either way, such differences are always a bad sign.\n"
-         "   \n"
-         "   To scan for more differences, you can run the 'verify' command\n"
-         "   again, starting at a higher byte offset.\n"
-         "\n"
-         "4. If 'verify' stopped at differences, use 'compare' to show them\n"
-         "\n"
-         "   For every byte offset, 'compare' shows the byte value which\n"
-         "   was expected, the byte value actually read back, the ASCII\n"
-         "   character corresponding to the value read back, and the bit\n"
-         "   differences (XOR) between both bytes.\n"
-         "   \n"
-         "   'compare' does not stop output by itself before the end of the\n"
-         "   file/device has been reached. Its output should therefore be\n"
-         "   piped through 'head' or 'more' in order to limit the number of\n"
-         "   lines displayed.\n"
-         "\n"
-         VERSION_INFO
+      (void)fprintf(
+                  isatty(STDOUT_FILENO)
+               || fstat(STDOUT_FILENO, &st) == 0 && S_ISFIFO(st.st_mode)
+            ?  stdout
+            :  stderr
+         ,  error=usage
+         ,  argc >= 1 ? argv[0] : "(unnamed_executable)"
       );
+      goto cleanup;
    }
-   if (!strcmp(argv[1], "write")) tgs.mode= mode_write;
-   else if (!strcmp(argv[1], "verify")) tgs.mode= mode_verify;
-   else if (!strcmp(argv[1], "compare")) tgs.mode= mode_compare;
-   else goto bad_arguments;
+   {
+      char const *cmd;
+      if (!strcmp(cmd= argv[1], "write")) tgs.mode= mode_write;
+      else if (!strcmp(cmd, "verify")) tgs.mode= mode_verify;
+      else if (!strcmp(cmd, "compare")) tgs.mode= mode_compare;
+      else goto bad_arguments;
+   }
    /* Determine the best I/O block size, defaulting the value preset
     * earlier. */
    {

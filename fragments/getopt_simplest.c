@@ -2,9 +2,7 @@
 #include <string.h>
 #include <assert.h>
 
-int getopt_simplest(
-   int *optind_ref, int *optpos_ref, int argc, char const *const *argv
-) {
+int getopt_simplest(int *optind_ref, int *optpos_ref, int argc, char **argv) {
    int c, i= *optpos_ref, optind= *optind_ref;
    if (argc <= 1) {
       assert(optind == 0);

@@ -36,7 +36,7 @@
  * normal arguments! The usage of this function is more portable than
  * getopt(), because the latter function is not part of the C standard. */
 int getopt_simplest(
-   int *optind_ref, int *optpos_ref, int argc, char const *const *argv
+   int *optind_ref, int *optpos_ref, int argc, char **argv
 );
 
 /* Consumes a mandatory argument for the last option character parsed. Such an
@@ -44,8 +44,8 @@ int getopt_simplest(
  * in two ways: "-kvalue" or "-k value". The first form is only possible if
  * the argument is not an empty string. Returns a pointer to the argument or
  * null if the argument is missing. */
-char *getopt_simplest_mand_arg(
-   int *optind_ref, int *optpos_ref, int argc, char const *const *argv
+char const *getopt_simplest_mand_arg(
+   int *optind_ref, int *optpos_ref, int argc, char **argv
 );
 
 /* Consumes an optional argument for the last option character parsed. Such an
@@ -54,15 +54,21 @@ char *getopt_simplest_mand_arg(
  * has been left out. The optional value cannot be an empty string; this would
  * be interpreted as a missing value. Returns a pointer to the optional
  * argument value or null if it has not been provided. */
-char *int getopt_simplest_opt_arg(
-   int *optind_ref, int *optpos_ref, int argc, char const *const *argv
+char const *getopt_simplest_opt_arg(
+   int *optind_ref, int *optpos_ref, int argc, char **argv
 );
 
 /* Write an error message complaining about an unsupported option to the
  * standard error stream and ignore any output error. Use this if
  * getopt_simplest() returned an option character which is not supported by
  * the application. */
-void getopt_simplest_perror(int bad_option_char);
+void getopt_simplest_perror_opt(int bad_option_char);
+
+/* Write an error message complaining about a missing mandatory argument for
+ * the encountered option <option_char> to the standard error stream and
+ * ignore any output error. Use this if getopt_simplest_mand_arg() returned
+ * null. */
+void getopt_simplest_perror_missing_arg(int option_char);
 
 
 #ifdef __cplusplus

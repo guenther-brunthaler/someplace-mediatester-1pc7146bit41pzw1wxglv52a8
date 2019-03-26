@@ -8,7 +8,7 @@
  * to allow disk I/O to run (mostly) in parallel, too. */
 
 #define VERSION_INFO \
- "Version 2019.85\n" \
+ "Version 2019.85.1\n" \
  "Copyright (c) 2017-2019 Guenther Brunthaler. All rights reserved.\n" \
  "\n" \
  "This program is free software.\n" \
@@ -28,6 +28,7 @@
 #endif
 
 #include <dim_sdbrke8ae851uitgzm4nv3ea2.h>
+#include <getopt_nh7lll77vb62ycgwzwf30zlln.h>
 #include <pearson.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -478,6 +479,71 @@ int main(int argc, char **argv) {
       unsigned workers_mutex: 1;
       unsigned workers_wakeup_call: 1;
    } have= {0};
+   {
+      int optind;
+      {
+         int opt, optpos;
+         char const *optarg;
+         optind= optpos= 0;
+         while (opt= getopt_simplest(&optind, &optpos, argc, argv)) {
+            switch (opt) {
+               case 't':
+                  if (
+                     !(
+                        optarg= getopt_simplest_mand_arg(
+                           &optind, &optpos, argc, argv
+                        )
+                     )
+                  ) {
+                     getopt_simplest_perror_missing_arg(opt);
+                     goto error_shown;
+                  }
+                  {
+                     int converted;
+                     if (
+                           sscanf(optarg, "%u%n", &threads, &converted) != 1
+                        || (size_t)converted != strlen(optarg)
+                     ) {
+                        ERROR("Invalid numeric option argument!");
+                     }
+                  }
+                  break;
+               default:
+                  getopt_simplest_perror_opt(opt);
+                  error_shown:
+                  error= (void *)1;
+                  goto cleanup;
+            }
+         }
+      }
+      /* Process arguments. */
+      if (optind == argc) goto bad_arguments;
+      {
+         char const *cmd;
+         if (!strcmp(cmd= argv[optind++], "write")) tgs.mode= mode_write;
+         else if (!strcmp(cmd, "verify")) tgs.mode= mode_verify;
+         else if (!strcmp(cmd, "compare")) tgs.mode= mode_compare;
+         else goto bad_arguments;
+      }
+      if (optind == argc) goto bad_arguments;
+      load_seed(&error, argv[optind++]); ERROR_CHECK();
+      if (optind < argc) {
+         tgs.pos= atou64(&error, argv[optind++]); ERROR_CHECK();
+      }
+      if (optind != argc) {
+         struct stat st;
+         bad_arguments:
+         (void)fprintf(
+                     isatty(STDOUT_FILENO)
+                  || fstat(STDOUT_FILENO, &st) == 0 && S_ISFIFO(st.st_mode)
+               ?  stdout
+               :  stderr
+            ,  error=usage
+            ,  argc >= 1 ? argv[0] : "(unnamed_executable)"
+         );
+         goto cleanup;
+      }
+   }
    /* Ignore SIGPIPE because we want it as a possible errno from write(). */
    if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) goto unlikely_error;
    /* Preset global variables for interthread communication. */
@@ -486,27 +552,6 @@ int main(int argc, char **argv) {
    have.workers_mutex= 1;
    if (pthread_cond_init(&tgs.workers_wakeup_call, 0)) goto unlikely_error;
    have.workers_wakeup_call= 1;
-   /* Process arguments. */
-   if (argc < 3 || argc > 4) {
-      struct stat st;
-      bad_arguments:
-      (void)fprintf(
-                  isatty(STDOUT_FILENO)
-               || fstat(STDOUT_FILENO, &st) == 0 && S_ISFIFO(st.st_mode)
-            ?  stdout
-            :  stderr
-         ,  error=usage
-         ,  argc >= 1 ? argv[0] : "(unnamed_executable)"
-      );
-      goto cleanup;
-   }
-   {
-      char const *cmd;
-      if (!strcmp(cmd= argv[1], "write")) tgs.mode= mode_write;
-      else if (!strcmp(cmd, "verify")) tgs.mode= mode_verify;
-      else if (!strcmp(cmd, "compare")) tgs.mode= mode_compare;
-      else goto bad_arguments;
-   }
    /* Determine the best I/O block size, defaulting the value preset
     * earlier. */
    {
@@ -564,9 +609,7 @@ int main(int argc, char **argv) {
       }
       tgs.blksz= bmask;
    }
-   load_seed(&error, argv[2]); ERROR_CHECK();
-   if (argc == 4) {
-      tgs.start_pos= tgs.pos= atou64(&error, argv[3]); ERROR_CHECK();
+   if (tgs.start_pos= tgs.pos) {
       if (tgs.pos % tgs.blksz) {
          ERROR("Starting offset must be a multiple of the I/O block size!");
       }
@@ -596,17 +639,17 @@ int main(int argc, char **argv) {
             assert((uint_fast64_t)pos == tgs.pos);
          }
       #endif
-   } else {
-      tgs.pos= 0;
    }
    {
       long rc;
+      unsigned procs;
       if (
             (rc= sysconf(_SC_NPROCESSORS_ONLN)) == -1
-         || (threads= (unsigned)rc , (long)threads != rc)
+         || (procs= (unsigned)rc , (long)procs != rc)
       ) {
          ERROR("Could not determine number of available CPU processors!");
       }
+      if (!threads || procs < threads) threads= procs;
    }
    if (threads < tgs.work_segments) {
       if (threads == 1) tgs.work_segments= 1;

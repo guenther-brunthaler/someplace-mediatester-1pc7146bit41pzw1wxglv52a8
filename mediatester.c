@@ -8,7 +8,7 @@
  * to allow disk I/O to run (mostly) in parallel, too. */
 
 #define VERSION_INFO \
- "Version 2019.85.1\n" \
+ "Version 2019.87\n" \
  "Copyright (c) 2017-2019 Guenther Brunthaler. All rights reserved.\n" \
  "\n" \
  "This program is free software.\n" \
@@ -39,17 +39,24 @@
 #include <inttypes.h>
 #include <pthread.h>
 #include <unistd.h>
+#include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/ioctl.h>
 #include <linux/fs.h>
+#include <linux/ioprio.h>
 
 #ifndef MAP_ANONYMOUS
    #error "MAP_ANONYMOUS is not defined by <sys/mman.h>!" \
       "For Linux, add '-D _GNU_SOURCE' to C preprocessor flags." \
       "For BSD, add '-D _BSD_SOURCE' to fix the problem." \
       "For other OSes, examine yourself what '-D'-options to add."
+#endif
+
+#ifndef SYS_ioprio_set
+   #error "SYS_ioprio_set is not defined by <sys/syscall.h>!" \
+      "For Linux, add '-D _GNU_SOURCE' to C preprocessor flags."
 #endif
 
 /* TWO such buffers will be allocated. */
@@ -425,6 +432,10 @@ static char const usage[]=
    "-t <n>: Use <n> CPU threads for write/verify commands instead of\n"
    "the autodetected number of available processor cores\n"
    "\n"
+   "-N: Don't be nice. By default, the program will behave as if it\n"
+   "had been invoked via 'nice' and 'ionice -c 3'. With -N, the\n"
+   "program will not do this and keep its initial niceness settings.\n"
+   "\n"
    "General usage procedure:\n"
    "\n"
    "1. Generate a seed file to be used with all following steps\n"
@@ -481,6 +492,7 @@ int main(int argc, char **argv) {
    } have= {0};
    {
       int optind;
+      int be_nice= 1;
       {
          int opt, optpos;
          char const *optarg;
@@ -508,6 +520,7 @@ int main(int argc, char **argv) {
                      }
                   }
                   break;
+               case 'N': be_nice= 0; break;;
                default:
                   getopt_simplest_perror_opt(opt);
                   error_shown:
@@ -542,6 +555,19 @@ int main(int argc, char **argv) {
             ,  argc >= 1 ? argv[0] : "(unnamed_executable)"
          );
          goto cleanup;
+      }
+      if (be_nice) {
+         errno= 0;
+         if (nice(10) == -1 && errno) {
+            ERROR("Could not make the process nice in terms of CPU usage!");
+         }
+         if (
+            syscall(
+                  SYS_ioprio_set, IOPRIO_WHO_PROCESS, getpid()
+               ,  IOPRIO_PRIO_VALUE(IOPRIO_CLASS_IDLE, 0))
+         ) {
+            ERROR("Could not make the process nice in terms of I/O priority!");
+         }
       }
    }
    /* Ignore SIGPIPE because we want it as a possible errno from write(). */

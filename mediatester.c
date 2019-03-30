@@ -402,7 +402,7 @@ static void FILE_mallocated_dtor(r4g *rc) {
    FILE *fh= r->handle;
    rc->rlist= r->saved;
    free(r);
-   if (fclose(fh)) error_c1("Error while closing file!");
+   if (fh && fclose(fh)) error_c1("Error while closing file!");
 }
 
 static void load_seed(char const *seed_file) {
@@ -527,14 +527,20 @@ static void error_reporting_dtor(r4g *rc) {
       em= rc->static_error_message;
       rc->static_error_message= 0;
    }
-   (void)fprintf(stderr, "%s failed: %s\n", c->argv0, em);
+   if (em) (void)fprintf(stderr, "%s failed: %s\n", c->argv0, em);
 }
 
+struct minimal_resource {
+   r4g_dtor dtor, *saved;
+};
+
 static void resource_context_thread_key_dtor(r4g *rc) {
+   R4G_DEFINE_INIT_RPTR(struct minimal_resource, *r=, rc, dtor);
    /* Clear out slot for main thread context because it has not been
     * allocated dynamically and should therefore not be passed to the
     * thread key's per-thread slot destructor. */
    int bad= pthread_setspecific(tgs.resource_context, 0);
+   rc->rlist= r->saved;
    if (pthread_key_delete(tgs.resource_context) || bad) {
       error_w_context_c1(rc, msg_exotic_error);
    }
@@ -561,10 +567,6 @@ static void pthread_cond_static_dtor(r4g *rc) {
    rc->rlist= r->saved;
    if (pthread_cond_destroy(r->cond)) error_c1(msg_exotic_error);
 }
-
-struct minimal_resource {
-   r4g_dtor dtor, *saved;
-};
 
 static void shared_buffers_dtor(r4g *rc) {
    {
@@ -979,5 +981,6 @@ int main(int argc, char **argv) {
    }
    if (fflush(0)) write_error: error_c1(msg_write_error);
    cleanup:
-   return EXIT_SUCCESS;
+   release_c1(&m);
+   return m.rollback ? EXIT_FAILURE : EXIT_SUCCESS;
 }

@@ -8,7 +8,7 @@
  * to allow disk I/O to run (mostly) in parallel, too. */
 
 #define VERSION_INFO \
- "Version 2019.89\n" \
+ "Version 2019.89.2\n" \
  "Copyright (c) 2017-2019 Guenther Brunthaler. All rights reserved.\n" \
  "\n" \
  "This program is free software.\n" \
@@ -33,6 +33,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stddef.h>
 #include <assert.h>
 #include <errno.h>
 #include <signal.h>
@@ -83,61 +84,110 @@ static struct {
    unsigned active_threads /* = 0; */;
    pthread_mutex_t workers_mutex;
    pthread_cond_t workers_wakeup_call;
-   pthread_key_t error_context;
+   pthread_key_t resource_context;
 } tgs; /* Thread global storage */
 
-/* Per-thread context for error handling. Associated with
- * <tgs.error_context>. */
-struct error_context {
+/* This is the primary type alias for working with the struct. No one wants to
+ * use its overly long real name! */
+typedef struct resource_context_4th_generation r4g;
+
+/* Pointer to a destructor function which will be called for deallocating the
+ * associated resource in rc->rlist. The destructor must replace rc->rlist
+ * with a pointer to the next resource before actually destroying the current
+ * resource, except for the case of a container object which is not yet empty.
+ * In the latter case, the destructor should select the oldest element of the
+ * container, remove it from the container first, and then deallocate only
+ * that element. */
+typedef void (*r4g_dtor)(r4g *rc);
+
+/* Per-thread context for resource cleanup including error handling and
+ * process termination. Associated with <tgs.resource_context>. */
+struct resource_context_4th_generation {
    int rollback; /* Zero for committing transactions during cleanup. */
    char const *static_error_message; /* Null if not set. */
-   /* Save/restore local variables before/after jump. May be null. */
-   void (*opt_freeze)(void *freeze_context, int thaw);
-   void *freeze_context; /* Passed through to opt_freeze(). */
-   jmp_buf continuation; /* Where to resume error handling. */
+   /* Null if the resource list is empty, or the address within the last
+    * resource list entry where the pointer to its associated destructor
+    * function is stored. Destructors need to locate the resource to be
+    * destroyed using this address. */
+   r4g_dtor *rlist;
 };
 
-#define CEIL_DIV(num, den) (((num) + (den) - 1) / (den))
-
-static void freeze_locals(struct error_context *ec) {
-   if (ec->opt_freeze) (*ec->opt_freeze)(ec->freeze_context, 0);
-}
-
-static void thaw_locals(struct error_context *ec) {
-   if (ec->opt_freeze) (*ec->opt_freeze)(ec->freeze_context, 1);
-}
-
-static void error_w_context(struct error_context *ec, char const *msg) {
-   ec->rollback= 1;
-   if (!ec->static_error_message) ec->static_error_message= msg;
-   freeze_locals(ec);
-   longjmp(ec->continuation, 1);
-}
+/* Defines a pointer variable to type resource_t and initializes it with a
+ * pointer to the beginning of an object of type resource_t where rc->rlist
+ * is a pointer to the struct's component <dtor_member>, which must be a
+ * pointer to the destructor function for the object. <var_eq> must be the
+ * part of the variable definition after resource_t and before the
+ * initialization value, such as "* my_ptr=".
+ *
+ * Example: R4G_DEFINE_INIT_RPTR(struct my_resource, *r=, rc, dtor); */
+#define R4G_DEFINE_INIT_RPTR(resource_t, var_eq, r4g_rc, dtor_member) \
+   resource_t var_eq (void *)( \
+      (char *)(r4g_rc)->rlist - offsetof(resource_t, dtor_member) \
+   )
 
 static char const msg_malloc_error[]= {
    "Memory allocation failure!"
 };
 
-static char const *create_thread_error_context(void) {
-   struct error_context *ec;
-   if (!(ec= malloc(sizeof *ec))) return msg_malloc_error;
-   ec->static_error_message= 0;
-   ec->opt_freeze= 0;
-   #ifndef NDEBUG
-      ec->freeze_context= (void *)-1;
-   #endif
-   if (!pthread_setspecific(tgs.error_context, ec)) return 0;
-   return "Could not set up per-thread error-handling context!";
+static char const *new_thread_r4g(void) {
+   r4g *rc;
+   if (!(rc= calloc(1, sizeof *rc))) return msg_malloc_error;
+   if (!pthread_setspecific(tgs.resource_context, rc)) return 0;
+   return "Could not set up per-thread resource context!";
 }
 
-static struct error_context *get_error_context(void) {
-   struct error_context *ec;
-   if (ec= pthread_getspecific(tgs.error_context)) return ec;
+/* Calls the destructor of the last entry in the specified resource list until
+ * there are no more entries left. Destructors need to unlink their entries
+ * from the resource list eventually, or this will become an endless loop.
+ * Destructors are also free to abort this loop prematurely by performing
+ * non-local jumps or calling exit(). */
+static void release_c1(r4g *resources) {
+   while (resources->rlist) (*resources->rlist)(resources);
+}
+
+/* Like release_c1() but stop releasing when resource <stop_at> would be
+ * released next. */
+static void release_to_c1(r4g *resources, r4g_dtor *stop_at) {
+   r4g_dtor *r;
+   while ((r= resources->rlist) && r != stop_at) (*r)(resources);
+}
+
+/* Raise an error in the specified resource context. <emsg> is a statically
+ * allocated text message, which will then be made available as the current
+ * error message of the resource context. However, this will be skipped and
+ * <emsg> will be completely ignored if <rollback> of the resource context is
+ * not zero, which means error processing is already underway and this is just
+ * a follow-up error. Next, <rollback> will be set to non-zero. Then
+ * release_c1() is called to release all resources, which will also display
+ * the error message if an appropriate resource destructor for this purpose
+ * has been allocated in the resource list before. Finally, the application
+ * will be terminated by exiting with a return code of EXIT_FAILURE. If a
+ * different return code is preferred, a resource for this purpose must be
+ * allocated, and its destructor should call exit() with the required return
+ * code. */
+static void error_w_context_c1(r4g *rc, char const *emsg) {
+   if (!rc->rollback) {
+      rc->static_error_message= emsg;
+      rc->rollback= 1;
+   }
+   release_c1(rc);
+   exit(EXIT_FAILURE);
+}
+
+/* Returns the current resource context of the executing thread. Depending on
+ * the build configuration, this may be retrieved from an internal static or
+ * thread-local variable. It may abort() in a multithreaded configuration if
+ * the thread-local resource context cannot be retrieved. */
+static r4g *r4g_c1(void) {
+   r4g *rc;
+   if (rc= pthread_getspecific(tgs.resource_context)) return rc;
    abort();
 }
 
-static void error(char const *msg) {
-   error_w_context(get_error_context(), msg);
+/* Same as error_w_context_c1(), but uses the current thread's local resource
+ * context. */
+static void error_c1(char const *emsg) {
+   error_w_context_c1(r4g_c1(), emsg);
 }
 
 static char const msg_exotic_error[]= {
@@ -148,179 +198,181 @@ static char const msg_write_error[]= {"Write error!"};
 
 static void pthread_mutex_lock_c1(pthread_mutex_t *mutex) {
    if (!pthread_mutex_lock(mutex)) return;
-   error("Could not lock mutex!");
+   error_c1("Could not lock mutex!");
 }
 
 static void pthread_cond_broadcast_c1(pthread_cond_t *cond) {
    if (!pthread_cond_broadcast(cond)) return;
-   error("Could not wake up worker threads!");
+   error_c1("Could not wake up worker threads!");
 }
 
 static void pthread_cond_wait_c1(
    pthread_cond_t *restrict cond, pthread_mutex_t *restrict mutex
 ) {
    if (!pthread_cond_wait(cond, mutex)) return;
-   error("Could not wait for condition variable!");
+   error_c1("Could not wait for condition variable!");
 }
 
 static void pthread_mutex_unlock_c1(pthread_mutex_t *mutex) {
    if (!pthread_mutex_unlock(mutex)) return;
-   error("Could not unlock mutex!");
+   error_c1("Could not unlock mutex!");
 }
 
-struct writer_thread_resources {
-   unsigned workers_mutex_procured;
+static void *malloc_c1(size_t bytes) {
+   void *buffer;
+   if (!(buffer= malloc(bytes))) error_c1(msg_malloc_error);
+   return buffer;
+}
+
+struct mutex_resource {
+   int procured;
+   pthread_mutex_t *mutex;
+   r4g_dtor dtor, *saved;
 };
 
-struct writer_thread_freeze_context {
-   struct writer_thread_resources *working_copy;
-   struct writer_thread_resources volatile frozen;
-};
+static void mutex_unlocker_dtor(r4g *rc) {
+   R4G_DEFINE_INIT_RPTR(struct mutex_resource, *r=, rc, dtor);
+   int procured= r->procured;
+   pthread_mutex_t *mutex= r->mutex;
+   rc->rlist= r->saved;
+   free(r);
+   if (procured) pthread_mutex_unlock_c1(mutex);
+}
 
-static void freeze_writer_thread(void *freeze_context, int thaw) {
-   struct writer_thread_freeze_context *c= freeze_context;
-   if (!thaw) {
-      c->frozen= *c->working_copy;
-   } else {
-      *c->working_copy= c->frozen;
-   }
+static int *mutex_unlocker_c5(pthread_mutex_t *mutex) {
+   r4g *rc= r4g_c1();
+   struct mutex_resource *r= malloc_c1(sizeof *r);
+   r->procured= 0;
+   r->mutex= mutex;
+   r->saved= rc->rlist; r->dtor= &mutex_unlocker_dtor; rc->rlist= &r->dtor;
+   return &r->procured;
 }
 
 static void *writer_thread(void *unused_dummy) {
-   struct writer_thread_resources have= {0};
-   struct writer_thread_freeze_context refrigerator= {&have};
-   struct error_context *ec;
+   r4g *rc;
+   int *workers_mutex_procured;
    (void)unused_dummy;
    {
       char const *error;
-      if (error= create_thread_error_context()) return (void *)error;
+      if (error= new_thread_r4g()) return (void *)error;
    }
-   ec= get_error_context();
-   ec->freeze_context= &refrigerator;
-   ec->opt_freeze= &freeze_writer_thread;
-   freeze_locals(ec);
-   if (!setjmp(ec->continuation)) {
-      thaw_locals(ec);
-      /* Lock the mutex before acessing the global work state variables. */
-      pthread_mutex_lock_c1(&tgs.workers_mutex);
-      have.workers_mutex_procured= 1;
-      ++tgs.active_threads; /* We just have started. */
-      /* Thread main loop. */
-      for (;;) {
-         assert(have.workers_mutex_procured);
-         assert(tgs.active_threads >= 1);
-         if (tgs.shutdown_requested) {
-            shutdown:
-            --tgs.active_threads;
-            goto cleanup;
-         }
-         if (tgs.shared_buffer == tgs.shared_buffer_stop) {
-            /* All worker segments have already been assigned to some
-             * thread. */
-            if (tgs.active_threads == 1) {
-               /* And we are the first/last thread running! Let's do I/O then.
-                * We switch the buffer first, and let then the other threads
-                * fill the next buffer while we write out the old buffer's
-                * contents. */
-               uint8_t const *out;
-               size_t left;
-               /* Switch buffers so other threads can resume working. */
-               if (
-                     tgs.shared_buffer - (left= tgs.shared_buffer_size)
-                  == tgs.shared_buffers[0]
-               ) {
-                  out= tgs.shared_buffers[0];
-                  tgs.shared_buffer= tgs.shared_buffers[1];
-               } else {
-                  out= tgs.shared_buffers[1];
-                  assert(tgs.shared_buffer - left == out);
-                  tgs.shared_buffer= tgs.shared_buffers[0];
-               }
-               tgs.shared_buffer_stop= tgs.shared_buffer + left;
-               have.workers_mutex_procured= 0;
-               pthread_mutex_unlock_c1(&tgs.workers_mutex);
-               /* Wake up other threads so they can start working on the other
-                * buffer. */
-               pthread_cond_broadcast_c1(&tgs.workers_wakeup_call);
-               /* Write the old buffer while the other threads already fill
-                * the new buffer. */
-               for (;;) {
-                  ssize_t written;
-                  if ((written= write(1, out, left)) <= 0) {
-                     if (written == 0) break;
-                     if (written != -1) {
-                        unlikely_error: error(msg_exotic_error);
-                     }
-                     /* The write() has failed. Examine why. */
-                     switch (errno) {
-                        case ENOSPC: /* We filled up the filesystem. */
-                        case EPIPE: /* Output stream has ended. */
-                        case EDQUOT: /* Quota has been reached. */
-                        case EFBIG: /* Maximum output size reached. */
-                           /* Those are all considered "good" reasons why the
-                            * write() has failed. */
-                           assert(left > 0);
-                           goto finished;
-                        case EINTR: continue; /* Interrupted write(). */
-                     }
-                     error(msg_write_error);
-                  }
-                  if ((size_t)written > left) goto unlikely_error;
-                  out+= (size_t)written;
-                  left-= (size_t)written;
-               }
-               finished:
-               pthread_mutex_lock_c1(&tgs.workers_mutex);
-               have.workers_mutex_procured= 1;
-               if (left) {
-                  /* Output data sink does not accept any more data - we are
-                   * done. Initiate successful termination. */
-                  tgs.shutdown_requested= 1;
-                  /* Make sure any sleeping threads will wake up to learn
-                   * about the shutdown request. */
-                  pthread_cond_broadcast_c1(&tgs.workers_wakeup_call);
-                  goto shutdown;
-               }
+   rc= r4g_c1();
+   workers_mutex_procured= mutex_unlocker_c5(&tgs.workers_mutex);
+   assert(!*workers_mutex_procured);
+   /* Lock the mutex before acessing the global work state variables. */
+   pthread_mutex_lock_c1(&tgs.workers_mutex);
+   *workers_mutex_procured= 1;
+   ++tgs.active_threads; /* We just have started. */
+   /* Thread main loop. */
+   for (;;) {
+      assert(*workers_mutex_procured);
+      assert(tgs.active_threads >= 1);
+      if (tgs.shutdown_requested) {
+         shutdown:
+         --tgs.active_threads;
+         goto cleanup;
+      }
+      if (tgs.shared_buffer == tgs.shared_buffer_stop) {
+         /* All worker segments have already been assigned to some
+          * thread. */
+         if (tgs.active_threads == 1) {
+            /* And we are the first/last thread running! Let's do I/O then.
+             * We switch the buffer first, and let then the other threads
+             * fill the next buffer while we write out the old buffer's
+             * contents. */
+            uint8_t const *out;
+            size_t left;
+            /* Switch buffers so other threads can resume working. */
+            if (
+                  tgs.shared_buffer - (left= tgs.shared_buffer_size)
+               == tgs.shared_buffers[0]
+            ) {
+               out= tgs.shared_buffers[0];
+               tgs.shared_buffer= tgs.shared_buffers[1];
             } else {
-               assert(tgs.active_threads >= 2);
-               /* We have nothing to do, but other worker threads are still
-                * active. Just wait until there is again possibly something to
-                * do. */
-               --tgs.active_threads;
-               have.workers_mutex_procured= 0;
-               pthread_cond_wait_c1(
-                  &tgs.workers_wakeup_call, &tgs.workers_mutex
-               );
-               have.workers_mutex_procured= 1;
-               ++tgs.active_threads;
+               out= tgs.shared_buffers[1];
+               assert(tgs.shared_buffer - left == out);
+               tgs.shared_buffer= tgs.shared_buffers[0];
+            }
+            tgs.shared_buffer_stop= tgs.shared_buffer + left;
+            *workers_mutex_procured= 0;
+            pthread_mutex_unlock_c1(&tgs.workers_mutex);
+            /* Wake up other threads so they can start working on the other
+             * buffer. */
+            pthread_cond_broadcast_c1(&tgs.workers_wakeup_call);
+            /* Write the old buffer while the other threads already fill
+             * the new buffer. */
+            for (;;) {
+               ssize_t written;
+               if ((written= write(1, out, left)) <= 0) {
+                  if (written == 0) break;
+                  if (written != -1) {
+                     unlikely_error: error_c1(msg_exotic_error);
+                  }
+                  /* The write() has failed. Examine why. */
+                  switch (errno) {
+                     case ENOSPC: /* We filled up the filesystem. */
+                     case EPIPE: /* Output stream has ended. */
+                     case EDQUOT: /* Quota has been reached. */
+                     case EFBIG: /* Maximum output size reached. */
+                        /* Those are all considered "good" reasons why the
+                         * write() has failed. */
+                        assert(left > 0);
+                        goto finished;
+                     case EINTR: continue; /* Interrupted write(). */
+                  }
+                  error_c1(msg_write_error);
+               }
+               if ((size_t)written > left) goto unlikely_error;
+               out+= (size_t)written;
+               left-= (size_t)written;
+            }
+            finished:
+            pthread_mutex_lock_c1(&tgs.workers_mutex);
+            *workers_mutex_procured= 1;
+            if (left) {
+               /* Output data sink does not accept any more data - we are
+                * done. Initiate successful termination. */
+               tgs.shutdown_requested= 1;
+               /* Make sure any sleeping threads will wake up to learn
+                * about the shutdown request. */
+               pthread_cond_broadcast_c1(&tgs.workers_wakeup_call);
+               goto shutdown;
             }
          } else {
-            /* There is more work to do. Seize the next work segment. */
-            pearnd_offset po;
-            uint8_t *work_segment= tgs.shared_buffer;
-            tgs.shared_buffer+= tgs.work_segment_sz;
-            pearnd_seek(&po, tgs.pos);
-            tgs.pos+= tgs.work_segment_sz;
-            /* Allow other threads to seize work segments as well. */
-            have.workers_mutex_procured= 0;
-            pthread_mutex_unlock_c1(&tgs.workers_mutex);
-            /* Do every worker thread's primary job: Process its work
-             * segment. */
-            pearnd_generate(work_segment, tgs.work_segment_sz, &po);
-            /* See whether we can get the next job. */
-            pthread_mutex_lock_c1(&tgs.workers_mutex);
-            have.workers_mutex_procured= 1;
+            assert(tgs.active_threads >= 2);
+            /* We have nothing to do, but other worker threads are still
+             * active. Just wait until there is again possibly something to
+             * do. */
+            --tgs.active_threads;
+            *workers_mutex_procured= 0;
+            pthread_cond_wait_c1(
+               &tgs.workers_wakeup_call, &tgs.workers_mutex
+            );
+            *workers_mutex_procured= 1;
+            ++tgs.active_threads;
          }
-      }
-   } else {
-      thaw_locals(ec);
-      cleanup:
-      if (have.workers_mutex_procured) {
-         have.workers_mutex_procured= 0;
+      } else {
+         /* There is more work to do. Seize the next work segment. */
+         pearnd_offset po;
+         uint8_t *work_segment= tgs.shared_buffer;
+         tgs.shared_buffer+= tgs.work_segment_sz;
+         pearnd_seek(&po, tgs.pos);
+         tgs.pos+= tgs.work_segment_sz;
+         /* Allow other threads to seize work segments as well. */
+         *workers_mutex_procured= 0;
          pthread_mutex_unlock_c1(&tgs.workers_mutex);
+         /* Do every worker thread's primary job: Process its work
+          * segment. */
+         pearnd_generate(work_segment, tgs.work_segment_sz, &po);
+         /* See whether we can get the next job. */
+         pthread_mutex_lock_c1(&tgs.workers_mutex);
+         *workers_mutex_procured= 1;
       }
    }
-   return (void *)ec->static_error_message;
+   cleanup:
+   release_c1(rc);
+   return (void *)rc->static_error_message;
 }
 
 static void *reader_thread(void *unused_dummy) {
@@ -335,33 +387,48 @@ static uint_fast64_t atou64(char const *numeric) {
          sscanf(numeric, "%" SCNuFAST64 "%n", &result, &converted) != 1
       || (size_t)converted != strlen(numeric)
    ) {
-      error("Invalid number!");
+      error_c1("Invalid number!");
    }
    return result;
 }
 
+struct FILE_mallocated_resource {
+   FILE *handle;
+   r4g_dtor dtor, *saved;
+};
+
+static void FILE_mallocated_dtor(r4g *rc) {
+   R4G_DEFINE_INIT_RPTR(struct FILE_mallocated_resource, *r=, rc, dtor);
+   FILE *fh= r->handle;
+   rc->rlist= r->saved;
+   free(r);
+   if (fclose(fh)) error_c1("Error while closing file!");
+}
+
 static void load_seed(char const *seed_file) {
-   #define MAX_SEED_BYTES 256
-   char seed[MAX_SEED_BYTES + 1]; /* 1 byte larger than actually allowed. */
-   size_t read;
+   struct FILE_mallocated_resource *f= malloc_c1(sizeof *f);
    FILE *fh;
-   char const *e= 0;
-   if (!(fh= fopen(seed_file, "rb"))) {
-      rd_err: e= "Cannot read seed file!"; goto fail;
+   r4g *rc;
+   r4g_dtor *marker;
+   f->saved= marker= (rc= r4g_c1())->rlist; f->dtor= &FILE_mallocated_dtor;
+   rc->rlist= &f->dtor;
+   if (!(f->handle= fh= fopen(seed_file, "rb"))) {
+      rd_err: error_c1("Cannot read seed file!");
    }
-   if ((read= fread(seed, sizeof *seed, DIM(seed), fh)) == DIM(seed)) {
-      e= "Key file for seeding the PRNG is larger than supported!"; goto fail;
+   {
+      #define MAX_SEED_BYTES 256
+      char seed[MAX_SEED_BYTES + 1]; /* 1 byte larger than actually allowed. */
+      #undef MAX_SEED_BYTES
+      size_t read;
+      if ((read= fread(seed, sizeof *seed, DIM(seed), fh)) == DIM(seed)) {
+         error_c1("Key file for seeding the PRNG is larger than supported!");
+      }
+      if (ferror(fh)) goto rd_err;
+      assert(feof(fh));
+      if (!read) error_c1("Seed file must not be empty!");
+      pearnd_init(seed, read);
    }
-   if (ferror(fh)) goto rd_err;
-   assert(feof(fh));
-   if (!read) { e= "Seed file must not be empty!"; goto fail; }
-   pearnd_init(seed, read);
-   fail:
-   if (fh) {
-      FILE *old= fh; fh= 0;
-      if (fclose(old)) { e= msg_exotic_error; goto fail; }
-   }
-   if (e) error(e);
+   release_to_c1(rc, marker);
 }
 
 static char const usage[]=
@@ -445,413 +512,472 @@ static char const usage[]=
    VERSION_INFO
 ;
 
-struct main_vars {
-   struct {
-      unsigned per_thread_context_slot: 1;
-      unsigned tvalid: 1;
-      unsigned tid: 1;
-      unsigned workers_mutex: 1;
-      unsigned workers_wakeup_call: 1;
-   } have;
-   struct error_context main_thread_context;
-   unsigned threads;
-   pthread_t *tid;
-   char *tvalid;
+struct error_reporting_static_resource {
+   r4g_dtor dtor, *saved;
+   char const *argv0;
 };
 
-struct main_freeze_context {
-   struct main_vars *working_copy;
-   struct main_vars volatile frozen;
-};
+static void error_reporting_dtor(r4g *rc) {
+   char const *em= 0;
+   R4G_DEFINE_INIT_RPTR( \
+      struct error_reporting_static_resource, *c=, rc, dtor \
+   );
+   rc->rlist= c->saved;
+   if (rc->rollback && rc->static_error_message) {
+      em= rc->static_error_message;
+      rc->static_error_message= 0;
+   }
+   (void)fprintf(stderr, "%s failed: %s\n", c->argv0, em);
+}
 
-static void freeze_main(void *freeze_context, int thaw) {
-   struct main_freeze_context *c= freeze_context;
-   if (!thaw) {
-      c->frozen= *c->working_copy;
-   } else {
-      *c->working_copy= c->frozen;
+static void resource_context_thread_key_dtor(r4g *rc) {
+   /* Clear out slot for main thread context because it has not been
+    * allocated dynamically and should therefore not be passed to the
+    * thread key's per-thread slot destructor. */
+   int bad= pthread_setspecific(tgs.resource_context, 0);
+   if (pthread_key_delete(tgs.resource_context) || bad) {
+      error_w_context_c1(rc, msg_exotic_error);
    }
 }
 
-int main(int argc, char **argv) {
-   struct main_vars m= {{0}};
-   struct main_freeze_context refrigerator= {&m};
-   m.main_thread_context.freeze_context= &refrigerator;
-   m.main_thread_context.opt_freeze= &freeze_main;
-   freeze_locals(&m.main_thread_context);
-   if (!setjmp(m.main_thread_context.continuation)) {
-      thaw_locals(&m.main_thread_context);
-      if (pthread_key_create(&tgs.error_context, free)) {
-         error_w_context(
-               &m.main_thread_context
-            ,  "Could not allocate a new slot for thread-local storage!"
-         );
-      }
-      m.have.per_thread_context_slot= 1;
-      if (pthread_setspecific(tgs.error_context, &m.main_thread_context)) {
-         error_w_context(
-               &m.main_thread_context
-            ,  "Could not set error-handling context for main thread!"
-         );
-      }
-      {
-         int optind;
-         int be_nice= 1;
-         {
-            int opt, optpos;
-            char const *optarg;
-            optind= optpos= 0;
-            while (opt= getopt_simplest(&optind, &optpos, argc, argv)) {
-               switch (opt) {
-                  case 't':
-                     if (
-                        !(
-                           optarg= getopt_simplest_mand_arg(
-                              &optind, &optpos, argc, argv
-                           )
-                        )
-                     ) {
-                        getopt_simplest_perror_missing_arg(opt);
-                        goto error_shown;
-                     }
-                     {
-                        int converted;
-                        if (
-                              sscanf(
-                                 optarg, "%u%n", &m.threads, &converted
-                              ) != 1
-                           || (size_t)converted != strlen(optarg)
-                        ) {
-                           error("Invalid numeric option argument!");
-                        }
-                     }
-                     break;
-                  case 'N': be_nice= 0; break;;
-                  default:
-                     getopt_simplest_perror_opt(opt);
-                     error_shown:
-                     m.main_thread_context.rollback= 1;
-                     goto cleanup;
-               }
+struct pthread_mutex_static_resource {
+   pthread_mutex_t *mutex;
+   r4g_dtor dtor, *saved;
+};
+
+static void pthread_mutex_static_dtor(r4g *rc) {
+   R4G_DEFINE_INIT_RPTR(struct pthread_mutex_static_resource, *r=, rc, dtor);
+   rc->rlist= r->saved;
+   if (pthread_mutex_destroy(r->mutex)) error_c1(msg_exotic_error);
+}
+
+struct pthread_cond_static_resource {
+   pthread_cond_t *cond;
+   r4g_dtor dtor, *saved;
+};
+
+static void pthread_cond_static_dtor(r4g *rc) {
+   R4G_DEFINE_INIT_RPTR(struct pthread_cond_static_resource, *r=, rc, dtor);
+   rc->rlist= r->saved;
+   if (pthread_cond_destroy(r->cond)) error_c1(msg_exotic_error);
+}
+
+struct minimal_resource {
+   r4g_dtor dtor, *saved;
+};
+
+static void shared_buffers_dtor(r4g *rc) {
+   {
+      unsigned i;
+      for (i= (unsigned)DIM(tgs.shared_buffers); i--; ) {
+         if (tgs.shared_buffers[i]) {
+            void *old= tgs.shared_buffers[i]; tgs.shared_buffers[i]= 0;
+            if (munmap(old, tgs.shared_buffer_size)) {
+               error_c1(msg_exotic_error);
             }
          }
-         /* Process arguments. */
-         if (optind == argc) goto bad_arguments;
-         {
-            char const *cmd;
-            if (!strcmp(cmd= argv[optind++], "write")) tgs.mode= mode_write;
-            else if (!strcmp(cmd, "verify")) tgs.mode= mode_verify;
-            else if (!strcmp(cmd, "compare")) tgs.mode= mode_compare;
-            else goto bad_arguments;
-         }
-         if (optind == argc) goto bad_arguments;
-         load_seed(argv[optind++]);
-         if (optind < argc) {
-            tgs.pos= atou64(argv[optind++]);
-         }
-         if (optind != argc) {
-            struct stat st;
-            bad_arguments:
-            (void)fprintf(
-                        isatty(STDOUT_FILENO)
-                     || fstat(STDOUT_FILENO, &st) == 0 && S_ISFIFO(st.st_mode)
-                  ?  stdout
-                  :  stderr
-               ,  usage
-               ,  argc >= 1 ? argv[0] : "(unnamed_executable)"
-            );
-            m.main_thread_context.rollback= 1;
-            goto cleanup;
-         }
-         if (be_nice) {
-            errno= 0;
-            if (nice(10) == -1 && errno) {
-               error("Could not make the process nice in terms of CPU usage!");
-            }
-            if (
-               syscall(
-                     SYS_ioprio_set, IOPRIO_WHO_PROCESS, getpid()
-                  ,  IOPRIO_PRIO_VALUE(IOPRIO_CLASS_IDLE, 0))
-            ) {
-               error(
-                  "Could not make the process nice in terms of I/O priority!"
-               );
-            }
-         }
-      }
-      /* Ignore SIGPIPE because we want it as a possible errno from write(). */
-      if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) goto unlikely_error;
-      /* Preset global variables for interthread communication. */
-      tgs.work_segments= 64;
-      if (pthread_mutex_init(&tgs.workers_mutex, 0)) goto unlikely_error;
-      m.have.workers_mutex= 1;
-      if (pthread_cond_init(&tgs.workers_wakeup_call, 0)) goto unlikely_error;
-      m.have.workers_wakeup_call= 1;
-      /* Determine the best I/O block size, defaulting the value preset
-       * earlier. */
-      {
-         struct stat st;
-         int fd;
-         mode_t mode;
-         if (
-            fstat(
-                  fd= tgs.mode != mode_write ? STDIN_FILENO : STDOUT_FILENO
-               ,  &st
-            )
-         ) {
-            error("Cannot examine file descriptor to be used for I/O!");
-         }
-         if (S_ISBLK(mode= st.st_mode)) {
-            /* It's a block device. */
-            {
-               long logical;
-               if (ioctl(fd, BLKSSZGET, &logical) < 0) {
-                  error("Unable to determine logical sector size!");
-               }
-               if ((size_t)logical > tgs.blksz) tgs.blksz= (size_t)logical;
-            }
-            {
-               long physical;
-               if (ioctl(fd, BLKPBSZGET, &physical) < 0) {
-                  error("Unable to determine physical sector size!");
-               }
-               if ((size_t)physical > tgs.blksz) tgs.blksz= (size_t)physical;
-            }
-            {
-               long optimal;
-               if (ioctl(fd, BLKIOOPT, &optimal) < 0) {
-                  error("Unable to determine optimal sector size!");
-               }
-               if ((size_t)optimal > tgs.blksz) tgs.blksz= (size_t)optimal;
-            }
-            if (tgs.mode != mode_write && ioctl(fd, BLKFLSBUF) < 0) {
-                error(
-                   "Unable to flush device buffer before starting operation!"
-                );
-            }
-         } else {
-            /* Some other kind of data source/sink. Assume the maximum of the
-             * MMU page size, the atomic pipe size and the fallback value. */
-             long page_size;
-             if ((page_size= sysconf(_SC_PAGESIZE)) == -1) goto unlikely_error;
-             if ((size_t)page_size > tgs.blksz) tgs.blksz= (size_t)page_size;
-             if (PIPE_BUF > tgs.blksz) tgs.blksz= PIPE_BUF;
-         }
-      }
-      {
-         size_t bmask= 512; /* <blksz> must be a power of 2 >= this value. */
-         while (bmask < tgs.blksz) {
-            size_t nmask;
-            if (!((nmask= bmask + bmask) > bmask)) {
-               error("Could not determine a suitable I/O block size");
-            }
-            bmask= nmask;
-         }
-         tgs.blksz= bmask;
-      }
-      if (tgs.start_pos= tgs.pos) {
-         if (tgs.pos % tgs.blksz) {
-            error("Starting offset must be a multiple of the I/O block size!");
-         }
-         if ((off_t)tgs.pos < 0) error("Numeric overflow in offset!");
-         if (
-            lseek(
-                  tgs.mode != mode_write ? STDIN_FILENO : STDOUT_FILENO
-               ,  (off_t)tgs.pos, SEEK_SET
-            ) == (off_t)-1
-         ) {
-            error(
-               "Could not reposition standard stream to starting position!"
-            );
-         }
-         #ifndef NDEBUG
-            {
-               off_t pos;
-               if (
-                  (
-                     pos= lseek(
-                              tgs.mode != mode_write
-                           ?  STDIN_FILENO
-                           :  STDOUT_FILENO
-                        ,  (off_t)0, SEEK_CUR
-                     )
-                  ) == (off_t)-1
-               ) {
-                  error("Could not determine standard stream position!");
-               }
-               assert(pos > 0);
-               assert((uint_fast64_t)pos == tgs.pos);
-            }
-         #endif
-      }
-      {
-         long rc;
-         unsigned procs;
-         if (
-               (rc= sysconf(_SC_NPROCESSORS_ONLN)) == -1
-            || (procs= (unsigned)rc , (long)procs != rc)
-         ) {
-            error("Could not determine number of available CPU processors!");
-         }
-         if (!m.threads || procs < m.threads) m.threads= procs;
-      }
-      if (m.threads < tgs.work_segments) {
-         if (m.threads == 1) tgs.work_segments= 1;
-         tgs.work_segments= tgs.work_segments / m.threads * m.threads;
-         assert(tgs.work_segments >= 1);
-      } else {
-         tgs.work_segments= m.threads;
-      }
-      /* Most threads will generate PRNG data. Another one does I/O and
-       * switches working buffers when the next buffer is ready. The main
-       * program thread only waits for termination of the other threads. */
-      ++m.threads; /* Compensate workers for lazy main program. */
-      tgs.work_segment_sz=
-         CEIL_DIV(APPROXIMATE_BUFFER_SIZE, tgs.work_segments)
-      ;
-      tgs.work_segment_sz=
-         CEIL_DIV(tgs.work_segment_sz, tgs.blksz) * tgs.blksz
-      ;
-      tgs.shared_buffer_size= tgs.work_segment_sz * tgs.work_segments;
-      if (
-         fprintf(
-               stderr
-            ,  "Starting %s offset: %" PRIdFAST64 " bytes\n"
-               "I/O block size: %u\n"
-               "PRNG worker threads: %u\n"
-               "worker's buffer segment size: %zu bytes\n"
-               "number of worker segments: %zu\n"
-               "size of buffer providing those worker segments: %zu bytes\n"
-               "number of such buffers: %u\n"
-               "\n%s PRNG data %s...\n"
-            ,  tgs.mode != mode_write ? "input" : "output"
-            ,  tgs.pos
-            ,  (unsigned)tgs.blksz
-            ,  m.threads - 1
-            ,  tgs.work_segment_sz
-            ,  tgs.work_segments
-            ,  tgs.shared_buffer_size
-            ,  (unsigned)DIM(tgs.shared_buffers)
-            ,  tgs.mode != mode_write ? "reading" : "writing"
-            ,  tgs.mode != mode_write
-               ? "from standard input"
-               : "to standard output"
-         ) <= 0
-      ) {
-         goto write_error;
-      }
-      {
-         unsigned i;
-         for (i= (unsigned)DIM(tgs.shared_buffers); i--; ) {
-            if (
-               (
-                  tgs.shared_buffers[i]= mmap(
-                        0, tgs.shared_buffer_size, PROT_READ | PROT_WRITE
-                     ,  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0
-                  )
-               ) == MAP_FAILED
-            ) {
-               error("Could not allocate I/O buffer!");
-            }
-         }
-      }
-      tgs.shared_buffer_stop=
-         (tgs.shared_buffer= tgs.shared_buffers[0]) + tgs.shared_buffer_size
-      ;
-      /* In verify mode, we start with a "finished" buffer, forcing the next
-       * buffer to be read as the first worker thread action. */
-      if (tgs.mode != mode_write) {
-         tgs.shared_buffer= (void *)tgs.shared_buffer_stop;
-      }
-      if (!(m.tid= calloc(m.threads, sizeof *m.tid))) {
-         malloc_error:
-         error(msg_malloc_error);
-      }
-      m.have.tid= 1;
-      if (!(m.tvalid= calloc(m.threads, sizeof *m.tvalid))) goto malloc_error;
-      m.have.tvalid= 1;
-      {
-         unsigned i;
-         for (i= m.threads; i--; ) {
-            if (
-               pthread_create(
-                     &m.tid[i], 0
-                  ,  tgs.mode == mode_write ? & writer_thread : &reader_thread
-                  ,  0
-               )
-            ) {
-               error("Could not create worker thread!\n");
-            }
-            m.tvalid[i]= 1;
-         }
-      }
-      if (fflush(0)) write_error: error(msg_write_error);
-      goto cleanup;
-   } else {
-      thaw_locals(&m.main_thread_context);
-      (void)fprintf(
-            stderr, "%s failed: %s\n"
-         ,  argc ? argv[0] : "<unnamed program>"
-         ,  m.main_thread_context.static_error_message
-      );
-      cleanup:
-      if (m.have.tvalid) {
-         unsigned i;
-         for (i= m.threads; i--; ) {
-            if (m.tvalid[i]) {
-               m.tvalid[i]= 0;
-               if (m.main_thread_context.rollback) {
-                  if (pthread_cancel(m.tid[i])) {
-                     error("Could not terminate child thread!");
-                  }
-               }
-               {
-                  void *thread_error;
-                  if (pthread_join(m.tid[i], &thread_error)) {
-                     error("Failure waiting for child thread to terminate!");
-                  }
-                  if (thread_error && thread_error != PTHREAD_CANCELED) {
-                     error(thread_error);
-                  }
-               }
-            }
-         }
-         m.have.tvalid= 0; free(m.tvalid);
-      }
-      if (m.have.tid) {
-         m.have.tid= 0; free(m.tid);
-      }
-      {
-         unsigned i;
-         for (i= (unsigned)DIM(tgs.shared_buffers); i--; ) {
-            if (tgs.shared_buffers[i]) {
-               void *old= tgs.shared_buffers[i]; tgs.shared_buffers[i]= 0;
-               if (munmap(old, tgs.shared_buffer_size)) {
-                  unlikely_error:
-                  error(msg_exotic_error);
-               }
-            }
-         }
-      }
-      if (m.have.workers_mutex) {
-         m.have.workers_mutex= 0;
-         if (pthread_mutex_destroy(&tgs.workers_mutex)) goto unlikely_error;
-      }
-      if (m.have.workers_wakeup_call) {
-         m.have.workers_wakeup_call= 0;
-         if (pthread_cond_destroy(&tgs.workers_wakeup_call)) {
-            goto unlikely_error;
-         }
-      }
-      if (m.have.per_thread_context_slot) {
-         int bad;
-         m.have.per_thread_context_slot= 0;
-         /* Clear out slot for main thread context because it has not been
-          * allocated dynamically and should therefore not be passed to the
-          * thread key's per-thread slot destructor. */
-         bad= pthread_setspecific(tgs.error_context, 0);
-         if (pthread_key_delete(tgs.error_context) || bad) goto unlikely_error;
       }
    }
-   return m.main_thread_context.rollback ? EXIT_FAILURE : EXIT_SUCCESS;
+   {
+      R4G_DEFINE_INIT_RPTR(struct minimal_resource, *r=, rc, dtor);
+      rc->rlist= r->saved;
+   }
+}
+
+struct cancel_threads_static_resource {
+   unsigned threads;
+   pthread_t *tid;
+   char *tvalid;
+   r4g_dtor dtor, *saved;
+};
+
+static void cancel_threads_dtor(r4g *rc) {
+   R4G_DEFINE_INIT_RPTR(struct cancel_threads_static_resource, *r=, rc, dtor);
+   {
+      unsigned i;
+      for (i= r->threads; i--; ) {
+         if (r->tvalid[i]) {
+            r->tvalid[i]= 0;
+            if (rc->rollback) {
+               if (pthread_cancel(r->tid[i])) {
+                  error_c1("Could not terminate child thread!");
+               }
+            }
+            {
+               void *thread_error;
+               if (pthread_join(r->tid[i], &thread_error)) {
+                  error_c1("Failure waiting for child thread to terminate!");
+               }
+               if (thread_error && thread_error != PTHREAD_CANCELED) {
+                  error_c1(thread_error);
+               }
+            }
+         }
+      }
+   }
+   rc->rlist= r->saved;
+}
+
+struct mallocated_resource {
+   void *buffer;
+   r4g_dtor dtor, *saved;
+};
+
+static void mallocated_dtor(r4g *rc) {
+   R4G_DEFINE_INIT_RPTR(struct mallocated_resource, *r=, rc, dtor);
+   void *buffer= r->buffer;
+   rc->rlist= r->saved;
+   free(r);
+   free(buffer);
+}
+
+static void *calloc_c5(size_t num_elements, size_t element_size) {
+   struct mallocated_resource *r= malloc_c1(sizeof *r);
+   r4g *rc;
+   r->saved= (rc= r4g_c1())->rlist;
+   r->dtor= &mallocated_dtor; rc->rlist= &r->dtor;
+   if (!(r->buffer= calloc(num_elements, element_size))) {
+      error_c1(msg_malloc_error);
+   }
+   return r->buffer;
+}
+
+#define CEIL_DIV(num, den) (((num) + (den) - 1) / (den))
+
+int main(int argc, char **argv) {
+   static unsigned threads;
+   static pthread_t *tid;
+   static char *tvalid;
+   static r4g m;
+   char const *argv0;
+   {
+      static struct error_reporting_static_resource r;
+      r.argv0= argv0= argc ? argv[0] : "<unnamed program>";
+      r.saved= m.rlist; r.dtor= &error_reporting_dtor; m.rlist= &r.dtor;
+   }
+   if (pthread_key_create(&tgs.resource_context, free)) {
+      error_w_context_c1(
+         &m, "Could not allocate a new slot for thread-local storage!"
+      );
+   }
+   {
+      static struct minimal_resource r;
+      r.saved= m.rlist; r.dtor= &resource_context_thread_key_dtor;
+      m.rlist= &r.dtor;
+   }
+   if (pthread_setspecific(tgs.resource_context, &m)) {
+      error_w_context_c1(
+         &m, "Could not set error-handling context for main thread!"
+      );
+   }
+   {
+      int optind;
+      int be_nice= 1;
+      {
+         int opt, optpos;
+         char const *optarg;
+         optind= optpos= 0;
+         while (opt= getopt_simplest(&optind, &optpos, argc, argv)) {
+            switch (opt) {
+               case 't':
+                  if (
+                     !(
+                        optarg= getopt_simplest_mand_arg(
+                           &optind, &optpos, argc, argv
+                        )
+                     )
+                  ) {
+                     getopt_simplest_perror_missing_arg(opt);
+                     goto error_shown;
+                  }
+                  {
+                     int converted;
+                     if (
+                           sscanf(
+                              optarg, "%u%n", &threads, &converted
+                           ) != 1
+                        || (size_t)converted != strlen(optarg)
+                     ) {
+                        error_c1("Invalid numeric option argument!");
+                     }
+                  }
+                  break;
+               case 'N': be_nice= 0; break;;
+               default:
+                  getopt_simplest_perror_opt(opt);
+                  goto error_shown;
+            }
+         }
+      }
+      /* Process arguments. */
+      if (optind == argc) goto bad_arguments;
+      {
+         char const *cmd;
+         if (!strcmp(cmd= argv[optind++], "write")) tgs.mode= mode_write;
+         else if (!strcmp(cmd, "verify")) tgs.mode= mode_verify;
+         else if (!strcmp(cmd, "compare")) tgs.mode= mode_compare;
+         else goto bad_arguments;
+      }
+      if (optind == argc) goto bad_arguments;
+      load_seed(argv[optind++]);
+      if (optind < argc) {
+         tgs.pos= atou64(argv[optind++]);
+      }
+      if (optind != argc) {
+         struct stat st;
+         bad_arguments:
+         (void)fprintf(
+                     isatty(STDOUT_FILENO)
+                  || fstat(STDOUT_FILENO, &st) == 0 && S_ISFIFO(st.st_mode)
+               ?  stdout
+               :  stderr
+            ,  usage
+            ,  argv0
+         );
+         error_shown:
+         m.static_error_message= 0;
+         m.rollback= 1;
+         goto cleanup;
+      }
+      if (be_nice) {
+         errno= 0;
+         if (nice(10) == -1 && errno) {
+            error_c1("Could not make the process nice in terms of CPU usage!");
+         }
+         if (
+            syscall(
+                  SYS_ioprio_set, IOPRIO_WHO_PROCESS, getpid()
+               ,  IOPRIO_PRIO_VALUE(IOPRIO_CLASS_IDLE, 0))
+         ) {
+            error_c1(
+               "Could not make the process nice in terms of I/O priority!"
+            );
+         }
+      }
+   }
+   /* Ignore SIGPIPE because we want it as a possible errno from write(). */
+   if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) goto unlikely_error;
+   /* Preset global variables for interthread communication. */
+   tgs.work_segments= 64;
+   if (pthread_mutex_init(&tgs.workers_mutex, 0)) goto unlikely_error;
+   {
+      static struct pthread_mutex_static_resource r;
+      r.mutex= &tgs.workers_mutex;
+      r.saved= m.rlist; r.dtor= &pthread_mutex_static_dtor;
+      m.rlist= &r.dtor;
+   }
+   if (pthread_cond_init(&tgs.workers_wakeup_call, 0)) goto unlikely_error;
+   {
+      static struct pthread_cond_static_resource r;
+      r.cond= &tgs.workers_wakeup_call;
+      r.saved= m.rlist; r.dtor= &pthread_cond_static_dtor;
+      m.rlist= &r.dtor;
+   }
+   /* Determine the best I/O block size, defaulting the value preset
+    * earlier. */
+   {
+      struct stat st;
+      int fd;
+      mode_t mode;
+      if (
+         fstat(
+               fd= tgs.mode != mode_write ? STDIN_FILENO : STDOUT_FILENO
+            ,  &st
+         )
+      ) {
+         error_c1("Cannot examine file descriptor to be used for I/O!");
+      }
+      if (S_ISBLK(mode= st.st_mode)) {
+         /* It's a block device. */
+         {
+            long logical;
+            if (ioctl(fd, BLKSSZGET, &logical) < 0) {
+               error_c1("Unable to determine logical sector size!");
+            }
+            if ((size_t)logical > tgs.blksz) tgs.blksz= (size_t)logical;
+         }
+         {
+            long physical;
+            if (ioctl(fd, BLKPBSZGET, &physical) < 0) {
+               error_c1("Unable to determine physical sector size!");
+            }
+            if ((size_t)physical > tgs.blksz) tgs.blksz= (size_t)physical;
+         }
+         {
+            long optimal;
+            if (ioctl(fd, BLKIOOPT, &optimal) < 0) {
+               error_c1("Unable to determine optimal sector size!");
+            }
+            if ((size_t)optimal > tgs.blksz) tgs.blksz= (size_t)optimal;
+         }
+         if (tgs.mode != mode_write && ioctl(fd, BLKFLSBUF) < 0) {
+             error_c1(
+                "Unable to flush device buffer before starting operation!"
+             );
+         }
+      } else {
+         /* Some other kind of data source/sink. Assume the maximum of the
+          * MMU page size, the atomic pipe size and the fallback value. */
+         long page_size;
+         if ((page_size= sysconf(_SC_PAGESIZE)) == -1) {
+            unlikely_error: error_c1(msg_exotic_error);
+         }
+         if ((size_t)page_size > tgs.blksz) tgs.blksz= (size_t)page_size;
+         if (PIPE_BUF > tgs.blksz) tgs.blksz= PIPE_BUF;
+      }
+   }
+   {
+      size_t bmask= 512; /* <blksz> must be a power of 2 >= this value. */
+      while (bmask < tgs.blksz) {
+         size_t nmask;
+         if (!((nmask= bmask + bmask) > bmask)) {
+            error_c1("Could not determine a suitable I/O block size");
+         }
+         bmask= nmask;
+      }
+      tgs.blksz= bmask;
+   }
+   if (tgs.start_pos= tgs.pos) {
+      if (tgs.pos % tgs.blksz) {
+         error_c1("Starting offset must be a multiple of the I/O block size!");
+      }
+      if ((off_t)tgs.pos < 0) error_c1("Numeric overflow in offset!");
+      if (
+         lseek(
+               tgs.mode != mode_write ? STDIN_FILENO : STDOUT_FILENO
+            ,  (off_t)tgs.pos, SEEK_SET
+         ) == (off_t)-1
+      ) {
+         error_c1(
+            "Could not reposition standard stream to starting position!"
+         );
+      }
+      #ifndef NDEBUG
+         {
+            off_t pos;
+            if (
+               (
+                  pos= lseek(
+                           tgs.mode != mode_write
+                        ?  STDIN_FILENO
+                        :  STDOUT_FILENO
+                     ,  (off_t)0, SEEK_CUR
+                  )
+               ) == (off_t)-1
+            ) {
+               error_c1("Could not determine standard stream position!");
+            }
+            assert(pos > 0);
+            assert((uint_fast64_t)pos == tgs.pos);
+         }
+      #endif
+   }
+   {
+      long rc;
+      unsigned procs;
+      if (
+            (rc= sysconf(_SC_NPROCESSORS_ONLN)) == -1
+         || (procs= (unsigned)rc , (long)procs != rc)
+      ) {
+         error_c1("Could not determine number of available CPU processors!");
+      }
+      if (!threads || procs < threads) threads= procs;
+   }
+   if (threads < tgs.work_segments) {
+      if (threads == 1) tgs.work_segments= 1;
+      tgs.work_segments= tgs.work_segments / threads * threads;
+      assert(tgs.work_segments >= 1);
+   } else {
+      tgs.work_segments= threads;
+   }
+   /* Most threads will generate PRNG data. Another one does I/O and
+    * switches working buffers when the next buffer is ready. The main
+    * program thread only waits for termination of the other threads. */
+   ++threads; /* Compensate workers for lazy main program. */
+   tgs.work_segment_sz=
+      CEIL_DIV(APPROXIMATE_BUFFER_SIZE, tgs.work_segments)
+   ;
+   tgs.work_segment_sz=
+      CEIL_DIV(tgs.work_segment_sz, tgs.blksz) * tgs.blksz
+   ;
+   tgs.shared_buffer_size= tgs.work_segment_sz * tgs.work_segments;
+   if (
+      fprintf(
+            stderr
+         ,  "Starting %s offset: %" PRIdFAST64 " bytes\n"
+            "I/O block size: %u\n"
+            "PRNG worker threads: %u\n"
+            "worker's buffer segment size: %zu bytes\n"
+            "number of worker segments: %zu\n"
+            "size of buffer providing those worker segments: %zu bytes\n"
+            "number of such buffers: %u\n"
+            "\n%s PRNG data %s...\n"
+         ,  tgs.mode != mode_write ? "input" : "output"
+         ,  tgs.pos
+         ,  (unsigned)tgs.blksz
+         ,  threads - 1
+         ,  tgs.work_segment_sz
+         ,  tgs.work_segments
+         ,  tgs.shared_buffer_size
+         ,  (unsigned)DIM(tgs.shared_buffers)
+         ,  tgs.mode != mode_write ? "reading" : "writing"
+         ,  tgs.mode != mode_write
+            ? "from standard input"
+            : "to standard output"
+      ) <= 0
+   ) {
+      goto write_error;
+   }
+   {
+      static struct minimal_resource r;
+      r.saved= m.rlist; r.dtor= &shared_buffers_dtor; m.rlist= &r.dtor;
+   }
+   {
+      unsigned i;
+      for (i= (unsigned)DIM(tgs.shared_buffers); i--; ) {
+         if (
+            (
+               tgs.shared_buffers[i]= mmap(
+                     0, tgs.shared_buffer_size, PROT_READ | PROT_WRITE
+                  ,  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0
+               )
+            ) == MAP_FAILED
+         ) {
+            error_c1("Could not allocate I/O buffer!");
+         }
+      }
+   }
+   tgs.shared_buffer_stop=
+      (tgs.shared_buffer= tgs.shared_buffers[0]) + tgs.shared_buffer_size
+   ;
+   /* In verify mode, we start with a "finished" buffer, forcing the next
+    * buffer to be read as the first worker thread action. */
+   if (tgs.mode != mode_write) {
+      tgs.shared_buffer= (void *)tgs.shared_buffer_stop;
+   }
+   tid= calloc_c5(threads, sizeof *tid);
+   tvalid= calloc_c5(threads, sizeof *tvalid);
+   {
+      static struct cancel_threads_static_resource r;
+      r.threads= threads; r.tid= tid; r.tvalid= tvalid;
+      r.saved= m.rlist; r.dtor= &cancel_threads_dtor; m.rlist= &r.dtor;
+   }
+   {
+      unsigned i;
+      for (i= threads; i--; ) {
+         if (
+            pthread_create(
+                  &tid[i], 0
+               ,  tgs.mode == mode_write ? & writer_thread : &reader_thread
+               ,  0
+            )
+         ) {
+            error_c1("Could not create worker thread!\n");
+         }
+         tvalid[i]= 1;
+      }
+   }
+   if (fflush(0)) write_error: error_c1(msg_write_error);
+   cleanup:
+   return EXIT_SUCCESS;
 }

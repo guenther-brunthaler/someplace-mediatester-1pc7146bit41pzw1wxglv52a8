@@ -8,7 +8,7 @@
  * to allow disk I/O to run (mostly) in parallel, too. */
 
 #define VERSION_INFO \
- "Version 2019.89.2\n" \
+ "Version 2019.90\n" \
  "Copyright (c) 2017-2019 Guenther Brunthaler. All rights reserved.\n" \
  "\n" \
  "This program is free software.\n" \
@@ -239,6 +239,12 @@ static void mutex_unlocker_dtor(r4g *rc) {
    if (procured) pthread_mutex_unlock_c1(mutex);
 }
 
+/* Returns the address of a status variable which must reflect the current
+ * locking state of the mutex. Zero means unlocked (and is also the initial
+ * setting). The caller needs to update this status in order to track the
+ * current state of the mutex. A resource is added to the current resource
+ * list which will unlock the mutex when the status indicates it is currently
+ * locked at the time when the destructor of the resource will be invoked. */
 static int *mutex_unlocker_c5(pthread_mutex_t *mutex) {
    r4g *rc= r4g_c1();
    struct mutex_resource *r= malloc_c1(sizeof *r);
@@ -270,7 +276,7 @@ static void *writer_thread(void *unused_dummy) {
       if (tgs.shutdown_requested) {
          shutdown:
          --tgs.active_threads;
-         goto cleanup;
+         break;
       }
       if (tgs.shared_buffer == tgs.shared_buffer_stop) {
          /* All worker segments have already been assigned to some
@@ -370,7 +376,6 @@ static void *writer_thread(void *unused_dummy) {
          *workers_mutex_procured= 1;
       }
    }
-   cleanup:
    release_c1(rc);
    return (void *)rc->static_error_message;
 }

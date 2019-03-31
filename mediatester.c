@@ -8,7 +8,7 @@
  * to allow disk I/O to run (mostly) in parallel, too. */
 
 #define VERSION_INFO \
- "Version 2019.90.7\n" \
+ "Version 2019.90.8\n" \
  "Copyright (c) 2017-2019 Guenther Brunthaler. All rights reserved.\n" \
  "\n" \
  "This program is free software.\n" \
@@ -1074,6 +1074,7 @@ int main(int argc, char **argv) {
       case mode_compare:
       case mode_diff:
          threads= 1; 
+         tgs.work_segments= 1;
          break;
       default:
       {
@@ -1089,6 +1090,7 @@ int main(int argc, char **argv) {
          }
          if (!threads || procs < threads) threads= procs;
       }
+      tgs.work_segments= 64;
       if (threads < tgs.work_segments) {
          if (threads == 1) tgs.work_segments= 1;
          tgs.work_segments= tgs.work_segments / threads * threads;

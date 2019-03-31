@@ -8,7 +8,7 @@
  * to allow disk I/O to run (mostly) in parallel, too. */
 
 #define VERSION_INFO \
- "Version 2019.89.2\n" \
+ "Version 2019.90\n" \
  "Copyright (c) 2017-2019 Guenther Brunthaler. All rights reserved.\n" \
  "\n" \
  "This program is free software.\n" \
@@ -110,6 +110,8 @@ struct resource_context_4th_generation {
     * function is stored. Destructors need to locate the resource to be
     * destroyed using this address. */
    r4g_dtor *rlist;
+   /* Avoid recursing into release_c1() when one is already running. */
+   jmp_buf *release_in_progress;
 };
 
 /* Defines a pointer variable to type resource_t and initializes it with a
@@ -142,7 +144,15 @@ static char const *new_thread_r4g(void) {
  * Destructors are also free to abort this loop prematurely by performing
  * non-local jumps or calling exit(). */
 static void release_c1(r4g *resources) {
-   while (resources->rlist) (*resources->rlist)(resources);
+   if (resources->release_in_progress) {
+      longjmp(*resources->release_in_progress, 1);
+   } else {
+      jmp_buf here;
+      resources->release_in_progress= &here;
+      (void)setjmp(here);
+      while (resources->rlist) (*resources->rlist)(resources);
+      resources->release_in_progress= 0;
+   }
 }
 
 /* Like release_c1() but stop releasing when resource <stop_at> would be

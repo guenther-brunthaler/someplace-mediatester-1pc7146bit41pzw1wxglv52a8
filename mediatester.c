@@ -8,7 +8,7 @@
  * to allow disk I/O to run (mostly) in parallel, too. */
 
 #define VERSION_INFO \
- "Version 2019.90.6\n" \
+ "Version 2019.90.7\n" \
  "Copyright (c) 2017-2019 Guenther Brunthaler. All rights reserved.\n" \
  "\n" \
  "This program is free software.\n" \
@@ -506,7 +506,7 @@ static void slow_comparison(void) {
    pearnd_offset po;
    uint8_t *const reference= tgs.shared_buffers[1];
    /* Write a header. */
-   fprintf_c1(stderr, "\nEX RD A XOR BYTE_OFFSET\n");
+   fprintf_c1(stderr, "\nEX RD A %-8s BYTE OFFSET\n", "XOR");
    pearnd_seek(&po, pos= tgs.pos);
    for (;;) {
       uint8_t *in= tgs.shared_buffer;
@@ -543,12 +543,13 @@ static void slow_comparison(void) {
          pos+= (uint_fast64_t)did_read;
          left-= (size_t)did_read;
       }
+      assert(left <= tgs.shared_buffer_size);
+      pos-= left= tgs.shared_buffer_size - left;
+      if (left == 0) break;
+      assert(left >= 1);
       /* Generate a full buffer of comparison data. */
       pearnd_generate(reference, tgs.shared_buffer_size, &po);
       /* Compare buffer contents. */
-      assert(left < tgs.shared_buffer_size);
-      pos-= left= tgs.shared_buffer_size - left;
-      assert(left >= 1);
       in= tgs.shared_buffer;
       {
          size_t i;
@@ -565,9 +566,8 @@ static void slow_comparison(void) {
                   }
                   if (xor) ++differences;
                }
-               fprintf_c1(
-                     stderr
-                  ,  "%02X %02X %c %8s %" PRIuFAST64 "\n"
+               printf_c1(
+                     "%02x %02x %c %8s %" PRIuFAST64 "\n"
                   ,  (unsigned)reference[i], rd
                   ,  rd >= 0x20 && rd < 0x7f ? rd : '.'
                   ,  octet, pos + i
@@ -1096,11 +1096,11 @@ int main(int argc, char **argv) {
       } else {
          tgs.work_segments= threads;
       }
-      /* Most threads will generate PRNG data. Another one does I/O and
-       * switches working buffers when the next buffer is ready. The main
-       * program thread only waits for termination of the other threads. */
-      ++threads; /* Compensate workers for lazy main program. */
    }
+   /* Most threads will generate PRNG data. Another one does I/O and
+    * switches working buffers when the next buffer is ready. The main
+    * program thread only waits for termination of the other threads. */
+   ++threads; /* Compensate workers for lazy main program. */
    tgs.work_segment_sz=
       CEIL_DIV(APPROXIMATE_BUFFER_SIZE, tgs.work_segments)
    ;

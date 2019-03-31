@@ -8,7 +8,7 @@
  * to allow disk I/O to run (mostly) in parallel, too. */
 
 #define VERSION_INFO \
- "Version 2019.90.5\n" \
+ "Version 2019.90.6\n" \
  "Copyright (c) 2017-2019 Guenther Brunthaler. All rights reserved.\n" \
  "\n" \
  "This program is free software.\n" \
@@ -67,7 +67,7 @@
 /* Global variables, grouped in a struct for easier tracking. */
 static struct {
    enum {
-      mode_write, mode_verify, mode_compare
+      mode_write, mode_verify, mode_compare, mode_diff
    } mode;
    int shutdown_requested /* = 0; */;
    uint8_t *shared_buffer, *shared_buffers[2];
@@ -232,6 +232,15 @@ static void printf_c1(char const *format, ...) {
    if (error) error_c1(msg_write_error);
 }
 
+static void fprintf_c1(FILE *s, char const *format, ...) {
+   va_list args;
+   int error;
+   va_start(args, format);
+   error= vfprintf(s, format, args) < 0;
+   va_end(args);
+   if (error) error_c1(msg_write_error);
+}
+
 struct mutex_resource {
    int procured;
    pthread_mutex_t *mutex;
@@ -331,7 +340,7 @@ static void *writer_thread(void *unused_dummy) {
                      case ENOSPC: /* We filled up the filesystem. */
                      case EPIPE: /* Output stream has ended. */
                      case EDQUOT: /* Quota has been reached. */
-                     case EFBIG: /* Maximum output size reached. */
+                     case EFBIG: /* Maximum file/device size reached. */
                         /* Those are all considered "good" reasons why the
                          * write() has failed. */
                         assert(left > 0);
@@ -361,10 +370,11 @@ static void *writer_thread(void *unused_dummy) {
                /* Output data sink does not accept any more data - we are
                 * done. Try to write some statistics to standard error. */
                assert(pos >= tgs.start_pos);
-               (void)fprintf(
+               fprintf_c1(
                      stderr
                   ,  "\n"
                      "Success!\n"
+                     "\n"
                      "Output stopped at byte offset %" PRIuFAST64 "!\n"
                      "(Output did start at byte offset %" PRIuFAST64 ")\n"
                      "Total bytes written: %" PRIuFAST64 "\n"
@@ -490,6 +500,98 @@ static void load_seed(char const *seed_file) {
    release_to_c1(rc, marker);
 }
 
+static void slow_comparison(void) {
+   uint_fast64_t differences= 0;
+   uint_fast64_t pos;
+   pearnd_offset po;
+   uint8_t *const reference= tgs.shared_buffers[1];
+   /* Write a header. */
+   fprintf_c1(stderr, "\nEX RD A XOR BYTE_OFFSET\n");
+   pearnd_seek(&po, pos= tgs.pos);
+   for (;;) {
+      uint8_t *in= tgs.shared_buffer;
+      size_t left= tgs.shared_buffer_size;
+      /* Read the next buffer full of input data. */
+      for (;;) {
+         ssize_t did_read;
+         if ((did_read= read(STDIN_FILENO, in, left)) <= 0) {
+            if (did_read == 0) break;
+            if (did_read != -1) {
+               unlikely_error: error_c1(msg_exotic_error);
+            }
+            /* The write() has failed. Examine why. */
+            switch (errno) {
+               case EFBIG: /* Maximum file/device size reached. */
+                  /* This is considered a "good" reason why the read() has
+                   * failed. */
+                  assert(left > 0);
+                  goto finished;
+               case EINTR: continue; /* Interrupted read(). */
+            }
+            assert(pos >= tgs.start_pos);
+            (void)fprintf(
+                  stderr
+               ,  "Read error at byte offset %" PRIuFAST64 "!\n"
+                  "(Reading did start at byte offset %" PRIuFAST64 ")\n"
+                  "Total bytes read so far: %" PRIuFAST64 "\n"
+               ,  pos, tgs.start_pos, pos - tgs.start_pos
+            );
+            error_c1("Read error!");
+         }
+         if ((size_t)did_read > left) goto unlikely_error;
+         in+= (size_t)did_read;
+         pos+= (uint_fast64_t)did_read;
+         left-= (size_t)did_read;
+      }
+      /* Generate a full buffer of comparison data. */
+      pearnd_generate(reference, tgs.shared_buffer_size, &po);
+      /* Compare buffer contents. */
+      assert(left < tgs.shared_buffer_size);
+      pos-= left= tgs.shared_buffer_size - left;
+      assert(left >= 1);
+      in= tgs.shared_buffer;
+      {
+         size_t i;
+         for (i= 0; i < left; ++i) {
+            if (tgs.mode == mode_diff && in[i] == reference[i]) continue;
+            {
+               char octet[8];
+               unsigned rd= in[i];
+               {
+                  unsigned xor= rd ^ reference[i];
+                  unsigned i, mask= 1;
+                  for (i= 8; i--; mask+= mask) {
+                     octet[i]= xor & mask ? '1' : '0';
+                  }
+                  if (xor) ++differences;
+               }
+               fprintf_c1(
+                     stderr
+                  ,  "%02X %02X %c %8s %" PRIuFAST64 "\n"
+                  ,  (unsigned)reference[i], rd
+                  ,  rd >= 0x20 && rd < 0x7f ? rd : '.'
+                  ,  octet, pos + i
+               );
+            }
+         }
+      }
+      pos+= left;
+   }
+   finished:
+   assert(pos >= tgs.start_pos);
+   fprintf_c1(
+         stderr
+      ,  "\n"
+         "Comparison complete!\n"
+         "\n"
+         "Reading stopped at byte offset %" PRIuFAST64 "!\n"
+         "(Reading did start at byte offset %" PRIuFAST64 ")\n"
+         "Different bytes encountered: %" PRIuFAST64 "\n"
+         "Total bytes compared: %" PRIuFAST64 "\n"
+      ,  pos, tgs.start_pos, differences, pos - tgs.start_pos
+   );
+}
+
 static char const usage[]=
    "Usage: %s [ <options> ... ] <mode> <seed_file> [ <starting_offset> ]\n"
    "\n"
@@ -526,6 +628,14 @@ static char const usage[]=
    "-N: Don't be nice. By default, the program will behave as if it\n"
    "had been invoked via 'nice' and 'ionice -c 3'. With -N, the\n"
    "program will not do this and keep its initial niceness settings.\n"
+   "\n"
+   "-F: Don't flush the device's cache when reading from a block\n"
+   "device. This makes comparison of small block devices less\n"
+   "reliable, because one never can be sure whether the data read\n"
+   "came actually from the device or rather from the cache. However,\n"
+   "flushing device buffers is a privileged operation, so\n"
+   "unprivileged users can never read from a block device without\n"
+   "this option, even if they are the owner of the device.\n"
    "\n"
    "-V: Display version information\n"
    "\n"
@@ -727,6 +837,7 @@ int main(int argc, char **argv) {
    static char *tvalid;
    static r4g m;
    char const *argv0;
+   int never_flush= 0;
    {
       static struct error_reporting_static_resource r;
       r.argv0= argv0= argc ? argv[0] : "<unnamed program>";
@@ -782,6 +893,7 @@ int main(int argc, char **argv) {
                case 'N': be_nice= 0; break;
                case 'V': printf_c1("%s\n", VERSION_INFO); goto cleanup;
                case 'h': printf_c1(usage, argv0); goto cleanup;
+               case 'F': never_flush= 1; break;
                default:
                   getopt_simplest_perror_opt(opt);
                   goto error_shown;
@@ -795,6 +907,7 @@ int main(int argc, char **argv) {
          if (!strcmp(cmd= argv[optind++], "write")) tgs.mode= mode_write;
          else if (!strcmp(cmd, "verify")) tgs.mode= mode_verify;
          else if (!strcmp(cmd, "compare")) tgs.mode= mode_compare;
+         else if (!strcmp(cmd, "diff")) tgs.mode= mode_diff;
          else goto bad_arguments;
       }
       if (optind == argc) goto bad_arguments;
@@ -894,7 +1007,9 @@ int main(int argc, char **argv) {
             }
             if ((size_t)optimal > tgs.blksz) tgs.blksz= (size_t)optimal;
          }
-         if (tgs.mode != mode_write && ioctl(fd, BLKFLSBUF) < 0) {
+         if (
+            !never_flush && tgs.mode != mode_write && ioctl(fd, BLKFLSBUF) < 0
+         ) {
              error_c1(
                 "Unable to flush device buffer before starting operation!"
              );
@@ -955,28 +1070,37 @@ int main(int argc, char **argv) {
          if ((uint_fast64_t)pos != tgs.pos) goto seeking_did_not_work;
       }
    }
-   {
-      long rc;
-      unsigned procs;
-      if (
-            (rc= sysconf(_SC_NPROCESSORS_ONLN)) == -1
-         || (procs= (unsigned)rc , (long)procs != rc)
-      ) {
-         error_c1("Could not determine number of available CPU processors!");
+   switch (tgs.mode) {
+      case mode_compare:
+      case mode_diff:
+         threads= 1; 
+         break;
+      default:
+      {
+         long rc;
+         unsigned procs;
+         if (
+               (rc= sysconf(_SC_NPROCESSORS_ONLN)) == -1
+            || (procs= (unsigned)rc , (long)procs != rc)
+         ) {
+            error_c1(
+               "Could not determine number of available CPU processors!"
+            );
+         }
+         if (!threads || procs < threads) threads= procs;
       }
-      if (!threads || procs < threads) threads= procs;
+      if (threads < tgs.work_segments) {
+         if (threads == 1) tgs.work_segments= 1;
+         tgs.work_segments= tgs.work_segments / threads * threads;
+         assert(tgs.work_segments >= 1);
+      } else {
+         tgs.work_segments= threads;
+      }
+      /* Most threads will generate PRNG data. Another one does I/O and
+       * switches working buffers when the next buffer is ready. The main
+       * program thread only waits for termination of the other threads. */
+      ++threads; /* Compensate workers for lazy main program. */
    }
-   if (threads < tgs.work_segments) {
-      if (threads == 1) tgs.work_segments= 1;
-      tgs.work_segments= tgs.work_segments / threads * threads;
-      assert(tgs.work_segments >= 1);
-   } else {
-      tgs.work_segments= threads;
-   }
-   /* Most threads will generate PRNG data. Another one does I/O and
-    * switches working buffers when the next buffer is ready. The main
-    * program thread only waits for termination of the other threads. */
-   ++threads; /* Compensate workers for lazy main program. */
    tgs.work_segment_sz=
       CEIL_DIV(APPROXIMATE_BUFFER_SIZE, tgs.work_segments)
    ;
@@ -984,33 +1108,29 @@ int main(int argc, char **argv) {
       CEIL_DIV(tgs.work_segment_sz, tgs.blksz) * tgs.blksz
    ;
    tgs.shared_buffer_size= tgs.work_segment_sz * tgs.work_segments;
-   if (
-      fprintf(
-            stderr
-         ,  "Starting %s offset: %" PRIdFAST64 " bytes\n"
-            "I/O block size: %u\n"
-            "PRNG worker threads: %u\n"
-            "worker's buffer segment size: %zu bytes\n"
-            "number of worker segments: %zu\n"
-            "size of buffer providing those worker segments: %zu bytes\n"
-            "number of such buffers: %u\n"
-            "\n%s PRNG data %s...\n"
-         ,  tgs.mode != mode_write ? "input" : "output"
-         ,  tgs.pos
-         ,  (unsigned)tgs.blksz
-         ,  threads - 1
-         ,  tgs.work_segment_sz
-         ,  tgs.work_segments
-         ,  tgs.shared_buffer_size
-         ,  (unsigned)DIM(tgs.shared_buffers)
-         ,  tgs.mode != mode_write ? "reading" : "writing"
-         ,  tgs.mode != mode_write
-            ? "from standard input"
-            : "to standard output"
-      ) <= 0
-   ) {
-      goto write_error;
-   }
+   fprintf_c1(
+         stderr
+      ,  "Starting %s offset: %" PRIdFAST64 " bytes\n"
+         "I/O block size: %u\n"
+         "PRNG worker threads: %u\n"
+         "worker's buffer segment size: %zu bytes\n"
+         "number of worker segments: %zu\n"
+         "size of buffer providing those worker segments: %zu bytes\n"
+         "number of such buffers: %u\n"
+         "\n%s PRNG data %s...\n"
+      ,  tgs.mode != mode_write ? "input" : "output"
+      ,  tgs.pos
+      ,  (unsigned)tgs.blksz
+      ,  threads - 1
+      ,  tgs.work_segment_sz
+      ,  tgs.work_segments
+      ,  tgs.shared_buffer_size
+      ,  (unsigned)DIM(tgs.shared_buffers)
+      ,  tgs.mode != mode_write ? "reading" : "writing"
+      ,  tgs.mode != mode_write
+         ? "from standard input"
+         : "to standard output"
+   );
    {
       static struct minimal_resource r;
       r.saved= m.rlist; r.dtor= &shared_buffers_dtor; m.rlist= &r.dtor;
@@ -1033,10 +1153,21 @@ int main(int argc, char **argv) {
    tgs.shared_buffer_stop=
       (tgs.shared_buffer= tgs.shared_buffers[0]) + tgs.shared_buffer_size
    ;
-   /* In verify mode, we start with a "finished" buffer, forcing the next
-    * buffer to be read as the first worker thread action. */
-   if (tgs.mode != mode_write) {
-      tgs.shared_buffer= (void *)tgs.shared_buffer_stop;
+   switch (tgs.mode) {
+      case mode_verify:
+         /* In verify mode, we start with a "finished" buffer, forcing the
+          * next buffer to be read as the first worker thread action. */
+         if (tgs.mode != mode_write) {
+            tgs.shared_buffer= (void *)tgs.shared_buffer_stop;
+         }
+         /* Fall through. */
+      default: break; /* To avoid switch-case coverage warnings. */
+      case mode_compare:
+      case mode_diff:
+      /* Handle operation modes which do not use multiple threads for
+       * simplicity of implementation. */
+      slow_comparison();
+      goto finished;
    }
    tid= calloc_c5(threads, sizeof *tid);
    tvalid= calloc_c5(threads, sizeof *tvalid);
@@ -1060,7 +1191,8 @@ int main(int argc, char **argv) {
          tvalid[i]= 1;
       }
    }
-   if (fflush(0)) write_error: error_c1(msg_write_error);
+   finished:
+   if (fflush(0)) error_c1(msg_write_error);
    cleanup:
    release_c1(&m);
    return m.rollback ? EXIT_FAILURE : EXIT_SUCCESS;

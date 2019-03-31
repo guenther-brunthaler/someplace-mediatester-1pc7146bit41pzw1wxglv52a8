@@ -8,7 +8,7 @@
  * to allow disk I/O to run (mostly) in parallel, too. */
 
 #define VERSION_INFO \
- "Version 2019.90.3\n" \
+ "Version 2019.90.4\n" \
  "Copyright (c) 2017-2019 Guenther Brunthaler. All rights reserved.\n" \
  "\n" \
  "This program is free software.\n" \
@@ -37,7 +37,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <signal.h>
-#include <setjmp.h>
+#include <stdarg.h>
 #include <inttypes.h>
 #include <pthread.h>
 #include <unistd.h>
@@ -223,6 +223,15 @@ static void *malloc_c1(size_t bytes) {
    return buffer;
 }
 
+static void printf_c1(char const *format, ...) {
+   va_list args;
+   int error;
+   va_start(args, format);
+   error= vprintf(format, args) < 0;
+   va_end(args);
+   if (error) error_c1(msg_write_error);
+}
+
 struct mutex_resource {
    int procured;
    pthread_mutex_t *mutex;
@@ -350,7 +359,18 @@ static void *writer_thread(void *unused_dummy) {
             *workers_mutex_procured= 1;
             if (left) {
                /* Output data sink does not accept any more data - we are
-                * done. Initiate successful termination. */
+                * done. Try to write some statistics to standard error. */
+               assert(pos >= tgs.start_pos);
+               (void)fprintf(
+                     stderr
+                  ,  "\n"
+                     "Success!\n"
+                     "Output stopped at byte offset %" PRIuFAST64 "!\n"
+                     "(Output did start at byte offset %" PRIuFAST64 ")\n"
+                     "Total bytes written: %" PRIuFAST64 "\n"
+                  ,  pos, tgs.start_pos, pos - tgs.start_pos
+               );
+               /* Initiate successful termination. */
                tgs.shutdown_requested= 1;
                /* Make sure any sleeping threads will wake up to learn
                 * about the shutdown request. */
@@ -469,8 +489,6 @@ static void load_seed(char const *seed_file) {
 }
 
 static char const usage[]=
-   "Invalid arguments!\n"
-   "\n"
    "Usage: %s [ <options> ... ] <mode> <seed_file> [ <starting_offset> ]\n"
    "\n"
    "where\n"
@@ -505,6 +523,10 @@ static char const usage[]=
    "-N: Don't be nice. By default, the program will behave as if it\n"
    "had been invoked via 'nice' and 'ionice -c 3'. With -N, the\n"
    "program will not do this and keep its initial niceness settings.\n"
+   "\n"
+   "-V: Display version information\n"
+   "\n"
+   "-h: Display this help\n"
    "\n"
    "General usage procedure:\n"
    "\n"
@@ -546,7 +568,7 @@ static char const usage[]=
    "   piped through 'head' or 'more' in order to limit the number of\n"
    "   lines displayed.\n"
    "\n"
-   VERSION_INFO
+   VERSION_INFO "\n"
 ;
 
 struct error_reporting_static_resource {
@@ -741,7 +763,9 @@ int main(int argc, char **argv) {
                      }
                   }
                   break;
-               case 'N': be_nice= 0; break;;
+               case 'N': be_nice= 0; break;
+               case 'V': printf_c1("%s\n", VERSION_INFO); goto cleanup;
+               case 'h': printf_c1(usage, argv0); goto cleanup;
                default:
                   getopt_simplest_perror_opt(opt);
                   goto error_shown;
@@ -763,16 +787,21 @@ int main(int argc, char **argv) {
          tgs.pos= atou64(argv[optind++]);
       }
       if (optind != argc) {
-         struct stat st;
          bad_arguments:
-         (void)fprintf(
-                     isatty(STDOUT_FILENO)
-                  || fstat(STDOUT_FILENO, &st) == 0 && S_ISFIFO(st.st_mode)
-               ?  stdout
-               :  stderr
-            ,  usage
-            ,  argv0
-         );
+         {
+            FILE *out;
+            {
+               struct stat st;
+               out=
+                        isatty(STDOUT_FILENO)
+                     || fstat(STDOUT_FILENO, &st) == 0 && S_ISFIFO(st.st_mode)
+                  ?  stdout
+                  :  stderr
+               ;
+            }
+            (void)fprintf(out, "%s\n\n", "Invalid arguments!");
+            (void)fprintf(out, usage, argv0);
+         }
          error_shown:
          m.static_error_message= 0;
          m.rollback= 1;

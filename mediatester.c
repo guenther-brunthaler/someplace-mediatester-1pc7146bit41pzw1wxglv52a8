@@ -8,7 +8,7 @@
  * to allow disk I/O to run (mostly) in parallel, too. */
 
 #define VERSION_INFO \
- "Version 2019.90.2\n" \
+ "Version 2019.90.3\n" \
  "Copyright (c) 2017-2019 Guenther Brunthaler. All rights reserved.\n" \
  "\n" \
  "This program is free software.\n" \
@@ -332,9 +332,10 @@ static void *writer_thread(void *unused_dummy) {
                   assert(pos >= tgs.start_pos);
                   (void)fprintf(
                         stderr
-                     ,  "Write error at byte offset %" PRIuFAST64 "\n"
+                     ,  "Write error at byte offset %" PRIuFAST64 "!\n"
+                        "(Output did start at byte offset %" PRIuFAST64 ")\n"
                         "Total bytes written so far: %" PRIuFAST64 "\n"
-                     ,  pos, pos - tgs.start_pos
+                     ,  pos, tgs.start_pos, pos - tgs.start_pos
                   );
                   error_c1(msg_write_error);
                }

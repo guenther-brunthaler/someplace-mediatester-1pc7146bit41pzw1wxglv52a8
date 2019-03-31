@@ -8,7 +8,7 @@
  * to allow disk I/O to run (mostly) in parallel, too. */
 
 #define VERSION_INFO \
- "Version 2019.90.4\n" \
+ "Version 2019.90.5\n" \
  "Copyright (c) 2017-2019 Guenther Brunthaler. All rights reserved.\n" \
  "\n" \
  "This program is free software.\n" \
@@ -431,7 +431,9 @@ static void *reader_thread(void *unused_dummy) {
    ++tgs.active_threads; /* We just have started. */
    /* Thread main loop. */
    for (;;) {
-      error_c1("Verify or compare mode has not been implemented yet!");
+      assert(*workers_mutex_procured);
+      assert(tgs.active_threads >= 1);
+      error_c1("Verify mode has not been implemented yet!");
    }
    release_c1(rc);
    return (void *)rc->static_error_message;
@@ -497,6 +499,7 @@ static char const usage[]=
    "  write - write PRNG stream to standard output at offset\n"
    "  verify - compare PRNG data against stream from standard input\n"
    "  compare - Like verify but show every byte ('should' and 'is')\n"
+   "  diff - Like compare but report only differing bytes\n"
    "<seed_file>: a binary (or text) file up to 256 bytes PRNG seed\n"
    "<starting_offset>: byte offset where to start writing/verifying\n"
    "\n"
@@ -556,17 +559,30 @@ static char const usage[]=
    "   To scan for more differences, you can run the 'verify' command\n"
    "   again, starting at a higher byte offset.\n"
    "\n"
-   "4. If 'verify' stopped at differences, use 'compare' to show them\n"
+   "4. If 'verify' stopped at differences, use 'compare' or 'diff'\n"
+   "   to show them.\n"
    "\n"
    "   For every byte offset, 'compare' shows the byte value which\n"
    "   was expected, the byte value actually read back, the ASCII\n"
    "   character corresponding to the value read back, and the bit\n"
    "   differences (XOR) between both bytes.\n"
    "   \n"
-   "   'compare' does not stop output by itself before the end of the\n"
-   "   file/device has been reached. Its output should therefore be\n"
-   "   piped through 'head' or 'more' in order to limit the number of\n"
-   "   lines displayed.\n"
+   "   'diff' does the same, but only writes output lines for bytes\n"
+   "   which actually differ. (It will therefore never display the\n"
+   "   XOR-value '00000000'.)\n"
+   "   \n"
+   "   This means 'diff' does basically the same as 'verify', but it\n"
+   "   is much, much slower. And unlike 'verify', 'diff' will not\n"
+   "   stop comparing when differences have been found.\n"
+   "   \n"
+   "   Therefore, always use 'verify' first to determine where bytes\n"
+   "   start to differ, then use 'diff' or 'compare' to look what\n"
+   "   exactly is different.\n"
+   "   \n"
+   "   'compare' and 'diff' do not stop output by themselves before\n"
+   "   the end of the file/device has been reached. Their output\n"
+   "   should therefore be piped through 'head' or 'more' in order\n"
+   "   to limit the number of lines displayed.\n"
    "\n"
    VERSION_INFO "\n"
 ;

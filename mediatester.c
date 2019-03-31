@@ -8,7 +8,7 @@
  * to allow disk I/O to run (mostly) in parallel, too. */
 
 #define VERSION_INFO \
- "Version 2019.90\n" \
+ "Version 2019.90.2\n" \
  "Copyright (c) 2017-2019 Guenther Brunthaler. All rights reserved.\n" \
  "\n" \
  "This program is free software.\n" \
@@ -76,15 +76,14 @@ static struct {
    size_t work_segments;
    size_t work_segment_sz;
    size_t shared_buffer_size;
-   uint_fast64_t pos; /* Current position. */
+   uint_fast64_t pos; /* Current position for next working segment. */
    uint_fast64_t start_pos; /* Initial starting offset. */
    uint_fast64_t first_error_pos; /* Only valid if num_errors != 0. */
-   uint_fast64_t last_error_pos; /* Only valid if num_errors != 0. */
-   uint_fast64_t num_errors; /* Count of differing bytes. */
-   unsigned active_threads /* = 0; */;
-   pthread_mutex_t workers_mutex;
-   pthread_cond_t workers_wakeup_call;
-   pthread_key_t resource_context;
+   uint_fast32_t num_errors; /* Count of differing bytes. */
+   unsigned active_threads; /* Number of threads not waiting for more work. */
+   pthread_mutex_t workers_mutex; /* Serialize access to THIS struct. */
+   pthread_cond_t workers_wakeup_call; /* Wake up threads for more work. */
+   pthread_key_t resource_context; /* For r4g_c1(). */
 } tgs; /* Thread global storage */
 
 /* This is the primary type alias for working with the struct. No one wants to
@@ -288,6 +287,7 @@ static void *writer_thread(void *unused_dummy) {
              * contents. */
             uint8_t const *out;
             size_t left;
+            uint_fast64_t pos;
             /* Switch buffers so other threads can resume working. */
             if (
                   tgs.shared_buffer - (left= tgs.shared_buffer_size)
@@ -300,17 +300,19 @@ static void *writer_thread(void *unused_dummy) {
                assert(tgs.shared_buffer - left == out);
                tgs.shared_buffer= tgs.shared_buffers[0];
             }
+            pos= tgs.pos - left;
             tgs.shared_buffer_stop= tgs.shared_buffer + left;
+            assert(*workers_mutex_procured);
             *workers_mutex_procured= 0;
             pthread_mutex_unlock_c1(&tgs.workers_mutex);
-            /* Wake up other threads so they can start working on the other
-             * buffer. */
+            /* Wake up the other threads so they can start working on the
+             * other buffer. */
             pthread_cond_broadcast_c1(&tgs.workers_wakeup_call);
-            /* Write the old buffer while the other threads already fill
+            /* Write out the old buffer while the other threads already fill
              * the new buffer. */
             for (;;) {
                ssize_t written;
-               if ((written= write(1, out, left)) <= 0) {
+               if ((written= write(STDOUT_FILENO, out, left)) <= 0) {
                   if (written == 0) break;
                   if (written != -1) {
                      unlikely_error: error_c1(msg_exotic_error);
@@ -327,13 +329,22 @@ static void *writer_thread(void *unused_dummy) {
                         goto finished;
                      case EINTR: continue; /* Interrupted write(). */
                   }
+                  assert(pos >= tgs.start_pos);
+                  (void)fprintf(
+                        stderr
+                     ,  "Write error at byte offset %" PRIuFAST64 "\n"
+                        "Total bytes written so far: %" PRIuFAST64 "\n"
+                     ,  pos, pos - tgs.start_pos
+                  );
                   error_c1(msg_write_error);
                }
                if ((size_t)written > left) goto unlikely_error;
                out+= (size_t)written;
+               pos+= (uint_fast64_t)written;
                left-= (size_t)written;
             }
             finished:
+            assert(!*workers_mutex_procured);
             pthread_mutex_lock_c1(&tgs.workers_mutex);
             *workers_mutex_procured= 1;
             if (left) {
@@ -351,7 +362,9 @@ static void *writer_thread(void *unused_dummy) {
              * active. Just wait until there is again possibly something to
              * do. */
             --tgs.active_threads;
+            assert(*workers_mutex_procured);
             *workers_mutex_procured= 0;
+            /* Unlock mutex, wait for a broadcast, then lock mutex again. */
             pthread_cond_wait_c1(
                &tgs.workers_wakeup_call, &tgs.workers_mutex
             );
@@ -381,8 +394,26 @@ static void *writer_thread(void *unused_dummy) {
 }
 
 static void *reader_thread(void *unused_dummy) {
+   r4g *rc;
+   int *workers_mutex_procured;
    (void)unused_dummy;
-   return (void *)"Verify mode has not been implemented yet!";
+   {
+      char const *error;
+      if (error= new_thread_r4g()) return (void *)error;
+   }
+   rc= r4g_c1();
+   workers_mutex_procured= mutex_unlocker_c5(&tgs.workers_mutex);
+   assert(!*workers_mutex_procured);
+   /* Lock the mutex before acessing the global work state variables. */
+   pthread_mutex_lock_c1(&tgs.workers_mutex);
+   *workers_mutex_procured= 1;
+   ++tgs.active_threads; /* We just have started. */
+   /* Thread main loop. */
+   for (;;) {
+      error_c1("Verify or compare mode has not been implemented yet!");
+   }
+   release_c1(rc);
+   return (void *)rc->static_error_message;
 }
               
 static uint_fast64_t atou64(char const *numeric) {
@@ -780,7 +811,7 @@ int main(int argc, char **argv) {
       r.saved= m.rlist; r.dtor= &pthread_cond_static_dtor;
       m.rlist= &r.dtor;
    }
-   /* Determine the best I/O block size, defaulting the value preset
+   /* Determine the best I/O block size, defaulting to the value preset
     * earlier. */
    {
       struct stat st;
@@ -855,29 +886,28 @@ int main(int argc, char **argv) {
             ,  (off_t)tgs.pos, SEEK_SET
          ) == (off_t)-1
       ) {
+         seeking_did_not_work:
          error_c1(
             "Could not reposition standard stream to starting position!"
          );
       }
-      #ifndef NDEBUG
-         {
-            off_t pos;
-            if (
-               (
-                  pos= lseek(
-                           tgs.mode != mode_write
-                        ?  STDIN_FILENO
-                        :  STDOUT_FILENO
-                     ,  (off_t)0, SEEK_CUR
-                  )
-               ) == (off_t)-1
-            ) {
-               error_c1("Could not determine standard stream position!");
-            }
-            assert(pos > 0);
-            assert((uint_fast64_t)pos == tgs.pos);
+      {
+         off_t pos;
+         if (
+            (
+               pos= lseek(
+                        tgs.mode != mode_write
+                     ?  STDIN_FILENO
+                     :  STDOUT_FILENO
+                  ,  (off_t)0, SEEK_CUR
+               )
+            ) == (off_t)-1
+         ) {
+            error_c1("Could not determine standard stream position!");
          }
-      #endif
+         assert(pos >= 0);
+         if ((uint_fast64_t)pos != tgs.pos) goto seeking_did_not_work;
+      }
    }
    {
       long rc;

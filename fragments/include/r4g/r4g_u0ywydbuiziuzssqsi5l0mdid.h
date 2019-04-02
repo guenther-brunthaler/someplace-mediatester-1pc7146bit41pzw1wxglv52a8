@@ -92,8 +92,8 @@ struct resource_context_4th_generation {
  * the implementation, this may be retrieved from an internal static or
  * thread-local variable. It will abort() in a multithreaded implementation if
  * the thread-local resource context cannot be retrieved. You have to
- * implement this function yourself. In the simplest case, just return the
- * address of a static variable of type r4g. */
+ * implement this function yourself if it is needed. In the simplest case,
+ * just return the address of a static variable of type r4g. */
 r4g *r4g_c1(void);
 
 /* Dynamically allocates a memory buffer for a <r4g> and initializes it. Then
@@ -119,43 +119,41 @@ void release_c1(r4g *rc);
 void release_to_c1(r4g *rc, r4g_dtor *stop_at);
 
 /* Raise an error. <static_message> must be a statically allocated error
- * message or null. If no static error message has been set in the current
- * resource context, it will be set to <static_message>. Otherwise it will be
+ * message or null. If no static error message has been set in the resource
+ * context <rc>, it will be set to <static_message>. Otherwise it will be
  * ignored because follow-up errors are not supposed to replace the original
- * first error message. If a dynamic error message has been created for the
- * current resource context, and if the current build supports
- * dynamic error messages at all (which is optional), <static_message> will
- * also be appended to its current contents, separating both by an empty line
- * unless this would make it the first line of the combined dynamic error
- * message. It is quite common to call error_c1() with a null argument for
- * unlikely errors that will probably never happen. The error display routine
- * might report such errors as "generic", "internal", "unspecified",
- * "anonymous" or something similar. Another reason for a null argument is if
- * the error messages have already been set and should not be touched. In any
- * case, raising an error will increment the current error count, unless it is
- * already saturated. If and when the error count may become saturated is an
- * implementation detail of this function. If an error display routine
- * supports dynamic messages, which is optional, it shall display the dynamic
- * message (unless it is empty/unset) instead of the static message. However,
- * an error display routine might also ignore both kinds of error messages and
- * just display the number of errors which occurred. Or even simpler, it might
- * just report that "an error" has occurred without giving any additional
- * details. It is therfore unwise to only set a dynamic message, because an
- * error display routine might choose to ignore the dynamic message and never
- * display it. Then release_c1() will be called to release all resources,
- * which will also display the error message if an appropriate resource
- * destructor for this purpose has been allocated in the resource list before.
- * Finally, the application will be terminated by exiting with a return code
- * of EXIT_FAILURE. If a different return code is preferred, a resource for
- * this purpose must be allocated, and its destructor should call exit() with
- * the required return code. */
-void error_c1(char const *static_message);
+ * first error message. If a dynamic error message has been created for <rc>,
+ * and if the current build supports dynamic error messages at all (which is
+ * optional), <static_message> will also be appended to its current contents,
+ * separating both by an empty line unless this would make it the first line
+ * of the combined dynamic error message. It is quite common to call
+ * error_c1() with a null argument for unlikely errors that will probably
+ * never happen. The error display routine might report such errors as
+ * "generic", "internal", "unspecified", "anonymous" or something similar.
+ * Another reason for a null argument is if the error messages have already
+ * been set and should not be touched. In any case, raising an error will
+ * increment the current error count, unless it is already saturated. If and
+ * when the error count may become saturated is an implementation detail of
+ * this function. If an error display routine supports dynamic messages, which
+ * is optional, it shall display the dynamic message (unless it is
+ * empty/unset) instead of the static message. However, an error display
+ * routine might also ignore both kinds of error messages and just display the
+ * number of errors which occurred. Or even simpler, it might just report that
+ * "an error" has occurred without giving any additional details. It is
+ * therfore unwise to only set a dynamic message, because an error display
+ * routine might choose to ignore the dynamic message and never display it.
+ * Then release_c1() will be called to release all resources, which will also
+ * display the error message if an appropriate resource destructor for this
+ * purpose has been allocated in the resource list before. Finally, the
+ * application will be terminated by exiting with a return code of
+ * EXIT_FAILURE. If a different return code is preferred, a resource for this
+ * purpose must be allocated, and its destructor should call exit() with the
+ * required return code. */
+void error_c1(r4g *rc, char const *static_message);
 
-/* Raise an error in the specified resource context. This is the same as
- * error_c1() but more efficient if you already have the pointer to the
- * current resource context. It can also be used to raise errors in the early
- * stages of the main program before r4g_c1() becomes operational. */
-void error_w_context_c1(r4g *rc, char const *static_message);
+/* Use this to save some typing if you don't already have an <r4g *> around.
+ * However, using this means that r4g_c1() needs actually to be implemented. */
+#define ERROR_C1(emsg) error_c1(r4g_c1(), emsg)
 
 /* To make your code compile whether or not R4G_ENV_TABLE_SUPPORT has been
  * defined, you should also use #ifdef in your code in order to decide whether
@@ -209,15 +207,6 @@ void error_w_context_c1(r4g *rc, char const *static_message);
     * <rc->enc> is null. */
    void create_dynamic_error_message_c5(r4g *rc);
 
-   /* If create_dynamic_error_message_c5() has never been called or if the
-    * current build does not support dynamic error messages, just do exactly
-    * the same as error_c1(). Otherwise, also do exactly the same as
-    * error_c1() would do, but stop at point where error_c1() would call
-    * release_c1() and return instead. This allows the caller to append
-    * additional information to the current error message or post-process it
-    * in some way before actually raising the error. */
-   void prepare_error_c1(char const *static_message);
-
    /* Continue doing the remainder what prepare_error_c1() would have done if
     * it had not returned but rather done the same as error_c1(). In other
     * words, calling prepare_error_c1() immediately followed by
@@ -225,14 +214,23 @@ void error_w_context_c1(r4g *rc, char const *static_message);
     * calls, the dynamically allocated error message can be modified and
     * extended, such as by incrementally appending additional optional
     * information to it. */
-   void complete_error_c1(void);
+   void complete_error_c1(r4g *rc);
 #endif /* !R4G_EXTENDED_ERROR_SUPPORT */
+
+/* If create_dynamic_error_message_c5() has never been called or if the
+ * current build does not support dynamic error messages, just do exactly the
+ * same as error_c1(). Otherwise, also do exactly the same as error_c1() would
+ * do, but stop at point where error_c1() would call release_c1() and return
+ * instead. This allows the caller to append additional information to the
+ * current error message or post-process it in some way before actually
+ * raising the error. */
+void prepare_error_c1(r4g *rc, char const *static_message);
 
 /* Sets the static error message to null and sets the dynamic error message
  * (if it exists and is supported by the current build) to an empty string.
  * Finally, set the current error count to zero. Call this after an error
  * message has been displayed. */
-void clear_error_c1(void);
+void clear_error_c1(r4g *rc);
 
 
 #ifdef __cplusplus

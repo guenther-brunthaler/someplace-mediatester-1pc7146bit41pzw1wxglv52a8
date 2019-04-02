@@ -8,7 +8,7 @@
  * to allow disk I/O to run (mostly) in parallel, too. */
 
 #define VERSION_INFO \
- "Version 2019.92\n" \
+ "Version 2019.92.1\n" \
  "Copyright (c) 2017-2019 Guenther Brunthaler. All rights reserved.\n" \
  "\n" \
  "This program is free software.\n" \
@@ -112,29 +112,29 @@ static char const msg_write_error[]= {"Write error!"};
 
 static void pthread_mutex_lock_c1(pthread_mutex_t *mutex) {
    if (!pthread_mutex_lock(mutex)) return;
-   error_c1("Could not lock mutex!");
+   ERROR_C1("Could not lock mutex!");
 }
 
 static void pthread_cond_broadcast_c1(pthread_cond_t *cond) {
    if (!pthread_cond_broadcast(cond)) return;
-   error_c1("Could not wake up worker threads!");
+   ERROR_C1("Could not wake up worker threads!");
 }
 
 static void pthread_cond_wait_c1(
    pthread_cond_t *restrict cond, pthread_mutex_t *restrict mutex
 ) {
    if (!pthread_cond_wait(cond, mutex)) return;
-   error_c1("Could not wait for condition variable!");
+   ERROR_C1("Could not wait for condition variable!");
 }
 
 static void pthread_mutex_unlock_c1(pthread_mutex_t *mutex) {
    if (!pthread_mutex_unlock(mutex)) return;
-   error_c1("Could not unlock mutex!");
+   ERROR_C1("Could not unlock mutex!");
 }
 
 static void *malloc_c1(size_t bytes) {
    void *buffer;
-   if (!(buffer= malloc(bytes))) error_c1(msg_malloc_error);
+   if (!(buffer= malloc(bytes))) ERROR_C1(msg_malloc_error);
    return buffer;
 }
 
@@ -144,7 +144,7 @@ static void printf_c1(char const *format, ...) {
    va_start(args, format);
    error= vprintf(format, args) < 0;
    va_end(args);
-   if (error) error_c1(msg_write_error);
+   if (error) ERROR_C1(msg_write_error);
 }
 
 static void fprintf_c1(FILE *s, char const *format, ...) {
@@ -153,7 +153,7 @@ static void fprintf_c1(FILE *s, char const *format, ...) {
    va_start(args, format);
    error= vfprintf(s, format, args) < 0;
    va_end(args);
-   if (error) error_c1(msg_write_error);
+   if (error) ERROR_C1(msg_write_error);
 }
 
 struct mutex_resource {
@@ -248,7 +248,7 @@ static void *writer_thread(void *unused_dummy) {
                if ((written= write(STDOUT_FILENO, out, left)) <= 0) {
                   if (written == 0) break;
                   if (written != -1) {
-                     unlikely_error: error_c1(msg_exotic_error);
+                     unlikely_error: ERROR_C1(msg_exotic_error);
                   }
                   /* The write() has failed. Examine why. */
                   switch (errno) {
@@ -270,7 +270,7 @@ static void *writer_thread(void *unused_dummy) {
                         "Total bytes written so far: %" PRIuFAST64 "\n"
                      ,  pos, tgs.start_pos, pos - tgs.start_pos
                   );
-                  error_c1(msg_write_error);
+                  error_c1(rc, msg_write_error);
                }
                if ((size_t)written > left) goto unlikely_error;
                out+= (size_t)written;
@@ -358,7 +358,7 @@ static void *reader_thread(void *unused_dummy) {
    for (;;) {
       assert(*workers_mutex_procured);
       assert(tgs.active_threads >= 1);
-      error_c1("Verify mode has not been implemented yet!");
+      error_c1(rc, "Verify mode has not been implemented yet!");
    }
    release_c1(rc);
    return (void *)rc->static_error_message;
@@ -371,7 +371,7 @@ static uint_fast64_t atou64(char const *numeric) {
          sscanf(numeric, "%" SCNuFAST64 "%n", &result, &converted) != 1
       || (size_t)converted != strlen(numeric)
    ) {
-      error_c1("Invalid number!");
+      ERROR_C1("Invalid number!");
    }
    return result;
 }
@@ -386,7 +386,7 @@ static void FILE_mallocated_dtor(r4g *rc) {
    FILE *fh= r->handle;
    rc->rlist= r->saved;
    free(r);
-   if (fh && fclose(fh)) error_c1("Error while closing file!");
+   if (fh && fclose(fh)) error_c1(rc, "Error while closing file!");
 }
 
 static void load_seed(char const *seed_file) {
@@ -397,7 +397,7 @@ static void load_seed(char const *seed_file) {
    f->saved= marker= (rc= r4g_c1())->rlist; f->dtor= &FILE_mallocated_dtor;
    rc->rlist= &f->dtor;
    if (!(f->handle= fh= fopen(seed_file, "rb"))) {
-      rd_err: error_c1("Cannot read seed file!");
+      rd_err: error_c1(rc, "Cannot read seed file!");
    }
    {
       #define MAX_SEED_BYTES 256
@@ -405,11 +405,13 @@ static void load_seed(char const *seed_file) {
       #undef MAX_SEED_BYTES
       size_t read;
       if ((read= fread(seed, sizeof *seed, DIM(seed), fh)) == DIM(seed)) {
-         error_c1("Key file for seeding the PRNG is larger than supported!");
+         error_c1(
+            rc, "Key file for seeding the PRNG is larger than supported!"
+         );
       }
       if (ferror(fh)) goto rd_err;
       assert(feof(fh));
-      if (!read) error_c1("Seed file must not be empty!");
+      if (!read) error_c1(rc, "Seed file must not be empty!");
       pearnd_init(seed, read);
    }
    release_to_c1(rc, marker);
@@ -432,7 +434,7 @@ static void slow_comparison(void) {
          if ((did_read= read(STDIN_FILENO, in, left)) <= 0) {
             if (did_read == 0) break;
             if (did_read != -1) {
-               unlikely_error: error_c1(msg_exotic_error);
+               unlikely_error: ERROR_C1(msg_exotic_error);
             }
             /* The write() has failed. Examine why. */
             switch (errno) {
@@ -451,7 +453,7 @@ static void slow_comparison(void) {
                   "Total bytes read so far: %" PRIuFAST64 "\n"
                ,  pos, tgs.start_pos, pos - tgs.start_pos
             );
-            error_c1("Read error!");
+            ERROR_C1("Read error!");
          }
          if ((size_t)did_read > left) goto unlikely_error;
          in+= (size_t)did_read;
@@ -627,7 +629,7 @@ static void error_reporting_dtor(r4g *rc) {
       if (!(em= rc->static_error_message)) em= msg_exotic_error;
    }
    if (em) (void)fprintf(stderr, "%s failed: %s\n", c->argv0, em);
-   clear_error_c1();
+   clear_error_c1(rc);
 }
 
 struct minimal_resource {
@@ -642,7 +644,7 @@ static void resource_context_thread_key_dtor(r4g *rc) {
    int bad= pthread_setspecific(tgs.resource_context, 0);
    rc->rlist= r->saved;
    if (pthread_key_delete(tgs.resource_context) || bad) {
-      error_w_context_c1(rc, msg_exotic_error);
+      error_c1(rc, msg_exotic_error);
    }
 }
 
@@ -654,7 +656,7 @@ struct pthread_mutex_static_resource {
 static void pthread_mutex_static_dtor(r4g *rc) {
    R4G_DEFINE_INIT_RPTR(struct pthread_mutex_static_resource, *r=, rc, dtor);
    rc->rlist= r->saved;
-   if (pthread_mutex_destroy(r->mutex)) error_c1(msg_exotic_error);
+   if (pthread_mutex_destroy(r->mutex)) ERROR_C1(msg_exotic_error);
 }
 
 struct pthread_cond_static_resource {
@@ -665,7 +667,7 @@ struct pthread_cond_static_resource {
 static void pthread_cond_static_dtor(r4g *rc) {
    R4G_DEFINE_INIT_RPTR(struct pthread_cond_static_resource, *r=, rc, dtor);
    rc->rlist= r->saved;
-   if (pthread_cond_destroy(r->cond)) error_c1(msg_exotic_error);
+   if (pthread_cond_destroy(r->cond)) ERROR_C1(msg_exotic_error);
 }
 
 static void shared_buffers_dtor(r4g *rc) {
@@ -675,7 +677,7 @@ static void shared_buffers_dtor(r4g *rc) {
          if (tgs.shared_buffers[i]) {
             void *old= tgs.shared_buffers[i]; tgs.shared_buffers[i]= 0;
             if (munmap(old, tgs.shared_buffer_size)) {
-               error_c1(msg_exotic_error);
+               error_c1(rc, msg_exotic_error);
             }
          }
       }
@@ -702,16 +704,18 @@ static void cancel_threads_dtor(r4g *rc) {
             r->tvalid[i]= 0;
             if (rc->errors) {
                if (pthread_cancel(r->tid[i])) {
-                  error_c1("Could not terminate child thread!");
+                  error_c1(rc, "Could not terminate child thread!");
                }
             }
             {
                void *thread_error;
                if (pthread_join(r->tid[i], &thread_error)) {
-                  error_c1("Failure waiting for child thread to terminate!");
+                  error_c1(
+                     rc, "Failure waiting for child thread to terminate!"
+                  );
                }
                if (thread_error && thread_error != PTHREAD_CANCELED) {
-                  error_c1(thread_error);
+                  error_c1(rc, thread_error);
                }
             }
          }
@@ -739,7 +743,7 @@ static void *calloc_c5(size_t num_elements, size_t element_size) {
    r->saved= (rc= r4g_c1())->rlist;
    r->dtor= &mallocated_dtor; rc->rlist= &r->dtor;
    if (!(r->buffer= calloc(num_elements, element_size))) {
-      error_c1(msg_malloc_error);
+      error_c1(rc, msg_malloc_error);
    }
    return r->buffer;
 }
@@ -759,7 +763,7 @@ int main(int argc, char **argv) {
       r.saved= m.rlist; r.dtor= &error_reporting_dtor; m.rlist= &r.dtor;
    }
    if (pthread_key_create(&tgs.resource_context, free)) {
-      error_w_context_c1(
+      error_c1(
          &m, "Could not allocate a new slot for thread-local storage!"
       );
    }
@@ -769,7 +773,7 @@ int main(int argc, char **argv) {
       m.rlist= &r.dtor;
    }
    if (pthread_setspecific(tgs.resource_context, &m)) {
-      error_w_context_c1(
+      error_c1(
          &m, "Could not set error-handling context for main thread!"
       );
    }
@@ -801,7 +805,7 @@ int main(int argc, char **argv) {
                            ) != 1
                         || (size_t)converted != strlen(optarg)
                      ) {
-                        error_c1("Invalid numeric option argument!");
+                        error_c1(&m, "Invalid numeric option argument!");
                      }
                   }
                   break;
@@ -854,7 +858,9 @@ int main(int argc, char **argv) {
       if (be_nice) {
          errno= 0;
          if (nice(10) == -1 && errno) {
-            error_c1("Could not make the process nice in terms of CPU usage!");
+            error_c1(
+               &m, "Could not make the process nice in terms of CPU usage!"
+            );
          }
          if (
             syscall(
@@ -862,7 +868,7 @@ int main(int argc, char **argv) {
                ,  IOPRIO_PRIO_VALUE(IOPRIO_CLASS_IDLE, 0))
          ) {
             error_c1(
-               "Could not make the process nice in terms of I/O priority!"
+               &m, "Could not make the process nice in terms of I/O priority!"
             );
          }
       }
@@ -897,28 +903,28 @@ int main(int argc, char **argv) {
             ,  &st
          )
       ) {
-         error_c1("Cannot examine file descriptor to be used for I/O!");
+         error_c1(&m, "Cannot examine file descriptor to be used for I/O!");
       }
       if (S_ISBLK(mode= st.st_mode)) {
          /* It's a block device. */
          {
             long logical;
             if (ioctl(fd, BLKSSZGET, &logical) < 0) {
-               error_c1("Unable to determine logical sector size!");
+               error_c1(&m, "Unable to determine logical sector size!");
             }
             if ((size_t)logical > tgs.blksz) tgs.blksz= (size_t)logical;
          }
          {
             long physical;
             if (ioctl(fd, BLKPBSZGET, &physical) < 0) {
-               error_c1("Unable to determine physical sector size!");
+               error_c1(&m, "Unable to determine physical sector size!");
             }
             if ((size_t)physical > tgs.blksz) tgs.blksz= (size_t)physical;
          }
          {
             long optimal;
             if (ioctl(fd, BLKIOOPT, &optimal) < 0) {
-               error_c1("Unable to determine optimal sector size!");
+               error_c1(&m, "Unable to determine optimal sector size!");
             }
             if ((size_t)optimal > tgs.blksz) tgs.blksz= (size_t)optimal;
          }
@@ -926,7 +932,7 @@ int main(int argc, char **argv) {
             !never_flush && tgs.mode != mode_write && ioctl(fd, BLKFLSBUF) < 0
          ) {
              error_c1(
-                "Unable to flush device buffer before starting operation!"
+                &m, "Unable to flush device buffer before starting operation!"
              );
          }
       } else {
@@ -934,7 +940,7 @@ int main(int argc, char **argv) {
           * MMU page size, the atomic pipe size and the fallback value. */
          long page_size;
          if ((page_size= sysconf(_SC_PAGESIZE)) == -1) {
-            unlikely_error: error_c1(msg_exotic_error);
+            unlikely_error: error_c1(&m, msg_exotic_error);
          }
          if ((size_t)page_size > tgs.blksz) tgs.blksz= (size_t)page_size;
          if (PIPE_BUF > tgs.blksz) tgs.blksz= PIPE_BUF;
@@ -945,7 +951,7 @@ int main(int argc, char **argv) {
       while (bmask < tgs.blksz) {
          size_t nmask;
          if (!((nmask= bmask + bmask) > bmask)) {
-            error_c1("Could not determine a suitable I/O block size");
+            error_c1(&m, "Could not determine a suitable I/O block size");
          }
          bmask= nmask;
       }
@@ -953,9 +959,11 @@ int main(int argc, char **argv) {
    }
    if (tgs.start_pos= tgs.pos) {
       if (tgs.pos % tgs.blksz) {
-         error_c1("Starting offset must be a multiple of the I/O block size!");
+         error_c1(
+            &m, "Starting offset must be a multiple of the I/O block size!"
+         );
       }
-      if ((off_t)tgs.pos < 0) error_c1("Numeric overflow in offset!");
+      if ((off_t)tgs.pos < 0) error_c1(&m, "Numeric overflow in offset!");
       if (
          lseek(
                tgs.mode != mode_write ? STDIN_FILENO : STDOUT_FILENO
@@ -964,7 +972,7 @@ int main(int argc, char **argv) {
       ) {
          seeking_did_not_work:
          error_c1(
-            "Could not reposition standard stream to starting position!"
+            &m, "Could not reposition standard stream to starting position!"
          );
       }
       {
@@ -979,7 +987,7 @@ int main(int argc, char **argv) {
                )
             ) == (off_t)-1
          ) {
-            error_c1("Could not determine standard stream position!");
+            error_c1(&m, "Could not determine standard stream position!");
          }
          assert(pos >= 0);
          if ((uint_fast64_t)pos != tgs.pos) goto seeking_did_not_work;
@@ -1000,7 +1008,7 @@ int main(int argc, char **argv) {
             || (procs= (unsigned)rc , (long)procs != rc)
          ) {
             error_c1(
-               "Could not determine number of available CPU processors!"
+               &m, "Could not determine number of available CPU processors!"
             );
          }
          if (!threads || procs < threads) threads= procs;
@@ -1063,7 +1071,7 @@ int main(int argc, char **argv) {
                )
             ) == MAP_FAILED
          ) {
-            error_c1("Could not allocate I/O buffer!");
+            error_c1(&m, "Could not allocate I/O buffer!");
          }
       }
    }
@@ -1103,13 +1111,13 @@ int main(int argc, char **argv) {
                ,  0
             )
          ) {
-            error_c1("Could not create worker thread!\n");
+            error_c1(&m, "Could not create worker thread!\n");
          }
          tvalid[i]= 1;
       }
    }
    finished:
-   if (fflush(0)) error_c1(msg_write_error);
+   if (fflush(0)) error_c1(&m, msg_write_error);
    cleanup:
    release_c1(&m);
    return m.errors ? EXIT_FAILURE : EXIT_SUCCESS;

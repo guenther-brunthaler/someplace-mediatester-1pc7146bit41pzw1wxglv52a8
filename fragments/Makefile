@@ -2,7 +2,7 @@ LIB = lib$(LIBNAME).a
 OBJECTS = $(SOURCES:.c=.o)
 
 LIBNAME = fragments
-INC_SUBDIR = include
+INCLUDES = -I . -I include
 
 .PHONY: all clean
 
@@ -14,7 +14,7 @@ clean:
 	-rm $(OBJECTS) $(LIB)
 
 COMBINED_CFLAGS= $(CPPFLAGS) $(CFLAGS)
-AUG_CFLAGS = $(COMBINED_CFLAGS) -I $(INC_SUBDIR)
+AUG_CFLAGS = $(COMBINED_CFLAGS) $(INCLUDES)
 
 .c.o:
 	$(CC) $(AUG_CFLAGS) -c $<

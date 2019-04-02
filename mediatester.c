@@ -8,7 +8,7 @@
  * to allow disk I/O to run (mostly) in parallel, too. */
 
 #define VERSION_INFO \
- "Version 2019.90.8\n" \
+ "Version 2019.92\n" \
  "Copyright (c) 2017-2019 Guenther Brunthaler. All rights reserved.\n" \
  "\n" \
  "This program is free software.\n" \
@@ -27,6 +27,7 @@
    #define _FILE_OFFSET_BITS 64
 #endif
 
+#include <r4g/r4g_u0ywydbuiziuzssqsi5l0mdid.h>
 #include <dim_sdbrke8ae851uitgzm4nv3ea2.h>
 #include <getopt_nh7lll77vb62ycgwzwf30zlln.h>
 #include <pearson.h>
@@ -86,107 +87,21 @@ static struct {
    pthread_key_t resource_context; /* For r4g_c1(). */
 } tgs; /* Thread global storage */
 
-/* This is the primary type alias for working with the struct. No one wants to
- * use its overly long real name! */
-typedef struct resource_context_4th_generation r4g;
-
-/* Pointer to a destructor function which will be called for deallocating the
- * associated resource in rc->rlist. The destructor must replace rc->rlist
- * with a pointer to the next resource before actually destroying the current
- * resource, except for the case of a container object which is not yet empty.
- * In the latter case, the destructor should select the oldest element of the
- * container, remove it from the container first, and then deallocate only
- * that element. */
-typedef void (*r4g_dtor)(r4g *rc);
-
-/* Per-thread context for resource cleanup including error handling and
- * process termination. Associated with <tgs.resource_context>. */
-struct resource_context_4th_generation {
-   int rollback; /* Zero for committing transactions during cleanup. */
-   char const *static_error_message; /* Null if not set. */
-   /* Null if the resource list is empty, or the address within the last
-    * resource list entry where the pointer to its associated destructor
-    * function is stored. Destructors need to locate the resource to be
-    * destroyed using this address. */
-   r4g_dtor *rlist;
-};
-
-/* Defines a pointer variable to type resource_t and initializes it with a
- * pointer to the beginning of an object of type resource_t where rc->rlist
- * is a pointer to the struct's component <dtor_member>, which must be a
- * pointer to the destructor function for the object. <var_eq> must be the
- * part of the variable definition after resource_t and before the
- * initialization value, such as "* my_ptr=".
- *
- * Example: R4G_DEFINE_INIT_RPTR(struct my_resource, *r=, rc, dtor); */
-#define R4G_DEFINE_INIT_RPTR(resource_t, var_eq, r4g_rc, dtor_member) \
-   resource_t var_eq (void *)( \
-      (char *)(r4g_rc)->rlist - offsetof(resource_t, dtor_member) \
-   )
-
 static char const msg_malloc_error[]= {
    "Memory allocation failure!"
 };
 
-static char const *new_thread_r4g(void) {
-   r4g *rc;
-   if (!(rc= calloc(1, sizeof *rc))) return msg_malloc_error;
-   if (!pthread_setspecific(tgs.resource_context, rc)) return 0;
-   return "Could not set up per-thread resource context!";
-}
-
-/* Calls the destructor of the last entry in the specified resource list until
- * there are no more entries left. Destructors need to unlink their entries
- * from the resource list eventually, or this will become an endless loop.
- * Destructors are also free to abort this loop prematurely by performing
- * non-local jumps or calling exit(). */
-static void release_c1(r4g *resources) {
-   while (resources->rlist) (*resources->rlist)(resources);
-}
-
-/* Like release_c1() but stop releasing when resource <stop_at> would be
- * released next. */
-static void release_to_c1(r4g *resources, r4g_dtor *stop_at) {
-   r4g_dtor *r;
-   while ((r= resources->rlist) && r != stop_at) (*r)(resources);
-}
-
-/* Raise an error in the specified resource context. <emsg> is a statically
- * allocated text message, which will then be made available as the current
- * error message of the resource context. However, this will be skipped and
- * <emsg> will be completely ignored if <rollback> of the resource context is
- * not zero, which means error processing is already underway and this is just
- * a follow-up error. Next, <rollback> will be set to non-zero. Then
- * release_c1() is called to release all resources, which will also display
- * the error message if an appropriate resource destructor for this purpose
- * has been allocated in the resource list before. Finally, the application
- * will be terminated by exiting with a return code of EXIT_FAILURE. If a
- * different return code is preferred, a resource for this purpose must be
- * allocated, and its destructor should call exit() with the required return
- * code. */
-static void error_w_context_c1(r4g *rc, char const *emsg) {
-   if (!rc->rollback) {
-      rc->static_error_message= emsg;
-      rc->rollback= 1;
-   }
-   release_c1(rc);
-   exit(EXIT_FAILURE);
-}
-
-/* Returns the current resource context of the executing thread. Depending on
- * the build configuration, this may be retrieved from an internal static or
- * thread-local variable. It may abort() in a multithreaded configuration if
- * the thread-local resource context cannot be retrieved. */
-static r4g *r4g_c1(void) {
+r4g *r4g_c1(void) {
    r4g *rc;
    if (rc= pthread_getspecific(tgs.resource_context)) return rc;
    abort();
 }
 
-/* Same as error_w_context_c1(), but uses the current thread's local resource
- * context. */
-static void error_c1(char const *emsg) {
-   error_w_context_c1(r4g_c1(), emsg);
+char const *new_r4g_thread_context_c0(void) {
+   r4g *rc;
+   if (!(rc= calloc(1, sizeof *rc))) return msg_malloc_error;
+   if (!pthread_setspecific(tgs.resource_context, rc)) return 0;
+   return "Could not set up per-thread resource context!";
 }
 
 static char const msg_exotic_error[]= {
@@ -277,7 +192,7 @@ static void *writer_thread(void *unused_dummy) {
    (void)unused_dummy;
    {
       char const *error;
-      if (error= new_thread_r4g()) return (void *)error;
+      if (error= new_r4g_thread_context_c0()) return (void *)error;
    }
    rc= r4g_c1();
    workers_mutex_procured= mutex_unlocker_c5(&tgs.workers_mutex);
@@ -430,7 +345,7 @@ static void *reader_thread(void *unused_dummy) {
    (void)unused_dummy;
    {
       char const *error;
-      if (error= new_thread_r4g()) return (void *)error;
+      if (error= new_r4g_thread_context_c0()) return (void *)error;
    }
    rc= r4g_c1();
    workers_mutex_procured= mutex_unlocker_c5(&tgs.workers_mutex);
@@ -708,11 +623,11 @@ static void error_reporting_dtor(r4g *rc) {
       struct error_reporting_static_resource, *c=, rc, dtor \
    );
    rc->rlist= c->saved;
-   if (rc->rollback && rc->static_error_message) {
-      em= rc->static_error_message;
-      rc->static_error_message= 0;
+   if (rc->errors) {
+      if (!(em= rc->static_error_message)) em= msg_exotic_error;
    }
    if (em) (void)fprintf(stderr, "%s failed: %s\n", c->argv0, em);
+   clear_error_c1();
 }
 
 struct minimal_resource {
@@ -785,7 +700,7 @@ static void cancel_threads_dtor(r4g *rc) {
       for (i= r->threads; i--; ) {
          if (r->tvalid[i]) {
             r->tvalid[i]= 0;
-            if (rc->rollback) {
+            if (rc->errors) {
                if (pthread_cancel(r->tid[i])) {
                   error_c1("Could not terminate child thread!");
                }
@@ -933,7 +848,7 @@ int main(int argc, char **argv) {
          }
          error_shown:
          m.static_error_message= 0;
-         m.rollback= 1;
+         m.errors= 1;
          goto cleanup;
       }
       if (be_nice) {
@@ -1197,5 +1112,5 @@ int main(int argc, char **argv) {
    if (fflush(0)) error_c1(msg_write_error);
    cleanup:
    release_c1(&m);
-   return m.rollback ? EXIT_FAILURE : EXIT_SUCCESS;
+   return m.errors ? EXIT_FAILURE : EXIT_SUCCESS;
 }

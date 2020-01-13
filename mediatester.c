@@ -8,8 +8,8 @@
  * to allow disk I/O to run (mostly) in parallel, too. */
 
 #define VERSION_INFO \
- "Version 2019.92.2\n" \
- "Copyright (c) 2017-2019 Guenther Brunthaler. All rights reserved.\n" \
+ "Version 2020.13\n" \
+ "Copyright (c) 2017-2020 Guenther Brunthaler. All rights reserved.\n" \
  "\n" \
  "This program is free software.\n" \
  "Distribution is permitted under the terms of the GPLv3."
@@ -935,7 +935,8 @@ int main(int argc, char **argv) {
                 &m, "Unable to flush device buffer before starting operation!"
              );
          }
-      } else {
+      }
+      if (!tgs.blksz) {
          /* Some other kind of data source/sink. Assume the maximum of the
           * MMU page size, the atomic pipe size and the fallback value. */
          long page_size;

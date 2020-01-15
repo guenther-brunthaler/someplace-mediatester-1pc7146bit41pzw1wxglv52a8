@@ -14,10 +14,8 @@ include sources.mk
 all: $(TARGETS)
 
 clean:
+	-cd $(LIB_1_SUBDIR) && $(MAKE) clean
 	-rm $(TARGETS) $(OBJECTS)
-
-deepclean: clean
-	for lib in $(LIBS); do (cd "`dirname "$$lib"`" && $(MAKE) clean); done
 
 COMBINED_CFLAGS= $(CPPFLAGS) $(CFLAGS)
 AUG_CFLAGS = \

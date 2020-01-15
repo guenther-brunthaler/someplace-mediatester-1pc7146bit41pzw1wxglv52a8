@@ -8,7 +8,7 @@
  * to allow disk I/O to run (mostly) in parallel, too. */
 
 #define VERSION_INFO \
- "Version 2020.13\n" \
+ "Version 2020.15\n" \
  "Copyright (c) 2017-2020 Guenther Brunthaler. All rights reserved.\n" \
  "\n" \
  "This program is free software.\n" \
@@ -25,6 +25,13 @@
    /* Feature-test macro which, if supported by the platform (such as glibc on
     * 32-bit Linux), will make lseek() and off_t support 64 bit offsets. */
    #define _FILE_OFFSET_BITS 64
+#endif
+
+#ifndef _GNU_SOURCE
+   /* Enable the following required definitions:
+    * MAP_ANONYMOUS <sys/mman.h>
+    * SYS_ioprio_set <sys/syscall.h> */
+    #define _GNU_SOURCE
 #endif
 
 #include <r4g/r4g_u0ywydbuiziuzssqsi5l0mdid.h>
@@ -49,18 +56,6 @@
 #include <sys/ioctl.h>
 #include <linux/fs.h>
 #include <linux/ioprio.h>
-
-#ifndef MAP_ANONYMOUS
-   #error "MAP_ANONYMOUS is not defined by <sys/mman.h>!" \
-      "For Linux, add '-D _GNU_SOURCE' to C preprocessor flags." \
-      "For BSD, add '-D _BSD_SOURCE' to fix the problem." \
-      "For other OSes, examine yourself what '-D'-options to add."
-#endif
-
-#ifndef SYS_ioprio_set
-   #error "SYS_ioprio_set is not defined by <sys/syscall.h>!" \
-      "For Linux, add '-D _GNU_SOURCE' to C preprocessor flags."
-#endif
 
 /* TWO such buffers will be allocated. */
 #define APPROXIMATE_BUFFER_SIZE (16ul << 20)

@@ -1,5 +1,12 @@
 .POSIX:
 
+# Preset portable default build options. Override by either assigning some of
+# those directly as part of the "make" command-line arguments. Or export
+# environment variables of the same names, plus "export MAKEFLAGS=e" also.
+CPPFLAGS = -D NDEBUG
+CFLAGS = -O
+LDFLAGS = -s
+
 OBJECTS = $(SOURCES:.c=.o)
 TARGETS = $(OBJECTS:.o=)
 LIBS = $(LIB_1_SUBDIR)/lib$(LIB_1_SUBDIR).a -lpthread
@@ -7,7 +14,7 @@ LIBS = $(LIB_1_SUBDIR)/lib$(LIB_1_SUBDIR).a -lpthread
 LIB_1_SUBDIR =  fragments
 LIB_1_INC_SUBDIR = include
 
-.PHONY: all clean deepclean
+.PHONY: all clean
 
 include sources.mk
 

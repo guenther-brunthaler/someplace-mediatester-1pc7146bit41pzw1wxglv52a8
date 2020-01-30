@@ -1,3 +1,12 @@
+.POSIX:
+
+# Preset portable default build options. Override by either assigning some of
+# those directly as part of the "make" command-line arguments. Or export
+# environment variables of the same names, plus "export MAKEFLAGS=e" also.
+CPPFLAGS = -D NDEBUG
+CFLAGS = -O
+LDFLAGS = -s
+
 LIB = lib$(LIBNAME).a
 OBJECTS = $(SOURCES:.c=.o)
 

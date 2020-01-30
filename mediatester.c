@@ -8,7 +8,7 @@
  * to allow disk I/O to run (mostly) in parallel, too. */
 
 #define VERSION_INFO \
- "Version 2020.15\n" \
+ "Version 2020.30\n" \
  "Copyright (c) 2017-2020 Guenther Brunthaler. All rights reserved.\n" \
  "\n" \
  "This program is free software.\n" \
@@ -903,21 +903,21 @@ int main(int argc, char **argv) {
       if (S_ISBLK(mode= st.st_mode)) {
          /* It's a block device. */
          {
-            long logical;
+            int logical;
             if (ioctl(fd, BLKSSZGET, &logical) < 0) {
                error_c1(&m, "Unable to determine logical sector size!");
             }
             if ((size_t)logical > tgs.blksz) tgs.blksz= (size_t)logical;
          }
          {
-            long physical;
+            int physical;
             if (ioctl(fd, BLKPBSZGET, &physical) < 0) {
                error_c1(&m, "Unable to determine physical sector size!");
             }
             if ((size_t)physical > tgs.blksz) tgs.blksz= (size_t)physical;
          }
          {
-            long optimal;
+            int optimal;
             if (ioctl(fd, BLKIOOPT, &optimal) < 0) {
                error_c1(&m, "Unable to determine optimal sector size!");
             }

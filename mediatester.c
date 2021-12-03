@@ -56,6 +56,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/ioctl.h>
+#include <sys/resource.h>
 #include <linux/fs.h>
 #include <linux/ioprio.h>
 
@@ -748,47 +749,36 @@ static void *calloc_c5(size_t num_elements, size_t element_size) {
    return r->buffer;
 }
 
-typedef struct {
-   clock_t real, user, sys;
-} proctimes;
-
-static void proctimes_snapshot(proctimes *dst) {
-   struct tms t;
-   if ((dst->real= times(&t)) == (clock_t)-1) ERROR_C1(0);
-   dst->user= t.tms_utime;
-   dst->sys= t.tms_stime;
-}
-
 struct report_times_static_resource {
-   proctimes pts;
+   struct timespec started;
    r4g_dtor dtor, *saved;
 };
 
-static void report_times(
-   char const *name, clock_t start, clock_t stop, clock_t cps
-) {
-   double delta;
-   if (stop < start) {
-   } else {
-      delta= stop - start;
-   }
-   (void)cps;
+static void report_times(char const *name, time_t seconds) {
+   fprintf_c1(
+         stderr
+      ,  "%s\t%lu seconds = %.1f minutes = %.3f hours\n"
+      ,  name
+      ,  (unsigned long)seconds
+      ,  seconds / 60.
+      ,  seconds / (60. * 60)
+   );
 }
 
 static void report_times_dtor(r4g *rc) {
    R4G_DEFINE_INIT_RPTR(struct report_times_static_resource, *r=, rc, dtor);
-   proctimes stopped;
-   clock_t cps;
+   struct timespec real;
+   struct rusage ru;
    rc->rlist= r->saved;
-   proctimes_snapshot(&stopped);
-   {
-      long val;
-      if ((val= sysconf(_SC_CLK_TCK)) == -1) ERROR_C1(0);
-      cps= (clock_t)val;
-   }
-   report_times("real", r->pts.real, stopped.real, cps);
-   report_times("user", r->pts.user, stopped.user, cps);
-   report_times("sys", r->pts.sys, stopped.sys, cps);
+   if (clock_gettime(CLOCK_MONOTONIC, &real) < 0) goto unlikely_error;
+   real.tv_sec-= r->started.tv_sec + (
+      real.tv_nsec < r->started.tv_nsec /* borrow */
+   );
+   if (getrusage(RUSAGE_SELF, &ru) < 0) unlikely_error: ERROR_C1(0);
+   fprintf_c1(stderr, "\n");
+   report_times("real", real.tv_sec);
+   report_times("user", ru.ru_utime.tv_sec);
+   report_times("sys", ru.ru_stime.tv_sec);
 }
 
 #define CEIL_DIV(num, den) (((num) + (den) - 1) / (den))
@@ -1128,7 +1118,7 @@ int main(int argc, char **argv) {
    ;
    {
       static struct report_times_static_resource r;
-      proctimes_snapshot(&r.pts);
+      if (clock_gettime(CLOCK_MONOTONIC, &r.started) < 0) goto unlikely_error;
       r.saved= m.rlist; r.dtor= &report_times_dtor; m.rlist= &r.dtor;
    }
    switch (tgs.mode) {

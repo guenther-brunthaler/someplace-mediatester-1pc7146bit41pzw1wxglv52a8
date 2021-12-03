@@ -8,8 +8,8 @@
  * to allow disk I/O to run (mostly) in parallel, too. */
 
 #define VERSION_INFO \
- "Version 2020.30\n" \
- "Copyright (c) 2017-2020 Guenther Brunthaler. All rights reserved.\n" \
+ "Version 2021.337\n" \
+ "Copyright (c) 2017-2021 Guenther Brunthaler. All rights reserved." \
  "\n" \
  "This program is free software.\n" \
  "Distribution is permitted under the terms of the GPLv3."
@@ -45,12 +45,14 @@
 #include <assert.h>
 #include <errno.h>
 #include <signal.h>
+#include <time.h>
 #include <stdarg.h>
 #include <inttypes.h>
 #include <pthread.h>
 #include <unistd.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
+#include <sys/times.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/ioctl.h>
@@ -538,7 +540,7 @@ static char const usage[]=
    "the autodetected number of available processor cores\n"
    "\n"
    "-N: Don't be nice. By default, the program will behave as if it\n"
-   "had been invoked via 'nice' and 'ionice -c 3'. With -N, the\n"
+   "had been invoked via 'nice' and 'ionice -n 6'. With -N, the\n"
    "program will not do this and keep its initial niceness settings.\n"
    "\n"
    "-F: Don't flush the device's cache when reading from a block\n"
@@ -622,9 +624,12 @@ static void error_reporting_dtor(r4g *rc) {
    rc->rlist= c->saved;
    if (rc->errors) {
       if (!(em= rc->static_error_message)) em= msg_exotic_error;
+      if (!*em) em= 0;
    }
-   if (em) (void)fprintf(stderr, "%s failed: %s\n", c->argv0, em);
-   clear_error_c1(rc);
+   if (em) {
+      (void)fprintf(stderr, "%s failed: %s\n", c->argv0, em);
+      clear_error_c1(rc);
+   }
 }
 
 struct minimal_resource {
@@ -743,6 +748,48 @@ static void *calloc_c5(size_t num_elements, size_t element_size) {
    return r->buffer;
 }
 
+typedef struct {
+   clock_t real, user, sys;
+} proctimes;
+
+static void proctimes_snapshot(proctimes *dst) {
+   struct tms t;
+   if ((dst->real= times(&t)) == (clock_t)-1) ERROR_C1(0);
+   dst->user= t.tms_utime;
+   dst->sys= t.tms_stime;
+}
+
+struct report_times_static_resource {
+   proctimes pts;
+   r4g_dtor dtor, *saved;
+};
+
+static void report_times(
+   char const *name, clock_t start, clock_t stop, clock_t cps
+) {
+   double delta;
+   if (stop < start) {
+   } else {
+      delta= stop - start;
+   }
+   (void)cps;
+}
+
+static void report_times_dtor(r4g *rc) {
+   R4G_DEFINE_INIT_RPTR(struct report_times_static_resource, *r=, rc, dtor);
+   proctimes stopped;
+   clock_t cps;
+   proctimes_snapshot(&stopped);
+   {
+      long val;
+      if ((val= sysconf(_SC_CLK_TCK)) == -1) ERROR_C1(0);
+      cps= (clock_t)val;
+   }
+   report_times("real", r->pts.real, stopped.real, cps);
+   report_times("user", r->pts.user, stopped.user, cps);
+   report_times("sys", r->pts.sys, stopped.sys, cps);
+}
+
 #define CEIL_DIV(num, den) (((num) + (den) - 1) / (den))
 
 int main(int argc, char **argv) {
@@ -846,7 +893,7 @@ int main(int argc, char **argv) {
             (void)fprintf(out, usage, argv0);
          }
          error_shown:
-         m.static_error_message= 0;
+         m.static_error_message= "";
          m.errors= 1;
          goto cleanup;
       }
@@ -858,9 +905,13 @@ int main(int argc, char **argv) {
             );
          }
          if (
+            /* Set second-lowest available best-effort I/O priority. This
+             * allows to user to set an even lower best-effort priority, even
+             * though by default all other processes will have a higher I/O
+             * priority. */
             syscall(
                   SYS_ioprio_set, IOPRIO_WHO_PROCESS, getpid()
-               ,  IOPRIO_PRIO_VALUE(IOPRIO_CLASS_IDLE, 0))
+               ,  IOPRIO_PRIO_VALUE(IOPRIO_CLASS_BE, 7 - 1))
          ) {
             error_c1(
                &m, "Could not make the process nice in terms of I/O priority!"
@@ -1074,6 +1125,11 @@ int main(int argc, char **argv) {
    tgs.shared_buffer_stop=
       (tgs.shared_buffer= tgs.shared_buffers[0]) + tgs.shared_buffer_size
    ;
+   {
+      static struct report_times_static_resource r;
+      proctimes_snapshot(&r.pts);
+      r.saved= m.rlist; r.dtor= &report_times_dtor; m.rlist= &r.dtor;
+   }
    switch (tgs.mode) {
       case mode_verify:
          /* In verify mode, we start with a "finished" buffer, forcing the

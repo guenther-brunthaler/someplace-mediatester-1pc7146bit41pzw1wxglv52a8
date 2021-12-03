@@ -8,7 +8,7 @@
  * to allow disk I/O to run (mostly) in parallel, too. */
 
 #define VERSION_INFO \
- "Version 2021.337.1\n" \
+ "Version 2021.337.2\n" \
  "Copyright (c) 2017-2021 Guenther Brunthaler. All rights reserved." \
  "\n" \
  "This program is free software.\n" \
@@ -40,6 +40,7 @@
 #include <pearson.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <locale.h>
 #include <string.h>
 #include <stddef.h>
 #include <assert.h>
@@ -790,6 +791,7 @@ int main(int argc, char **argv) {
    static r4g m;
    char const *argv0;
    int never_flush= 0;
+   (void)setlocale(LC_ALL, ""); /* Enable locale if supported. */
    {
       static struct error_reporting_static_resource r;
       r.argv0= argv0= argc ? argv[0] : "<unnamed program>";

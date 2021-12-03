@@ -38,9 +38,9 @@
 # size extracted from the script name (or -n) option and exits without
 # actually trying to create any block device.
 #
-# Version 2019.79
+# Version 2021.337
 #
-# Copyright (c) 2019 Guenther Brunthaler. All rights reserved.
+# Copyright (c) 2019-2021 Guenther Brunthaler. All rights reserved.
 #
 # This script is free software.
 # Distribution is permitted under the terms of the GPLv3.
@@ -77,8 +77,15 @@ test -f "$me"
 uid=`id -u`
 if test $uid != 0
 then
+	df=
+	for o in x v
+	do
+		case $- in
+			*$o*) df=$df$o;;
+		esac
+	done
 	command -v sudo > /dev/null 2>& 1 \
-	&& exec sudo "$me" -n "$0" -u $uid ${1+"$@"}
+	&& exec sudo "$me" -n "$0" ${df:+-D $df} -u $uid ${1+"$@"}
 	echo "Please install 'sudo' or run this command as the superuser!" >& 2
 	false || exit
 fi
@@ -87,13 +94,14 @@ chowner=
 name=`basename -- "$0"`
 just_show=false
 just_remove=false
-while getopts n:su:r opt
+while getopts D:n:su:r opt
 do
 	case $opt in
 		u) chowner=$OPTARG;;
 		s) just_show=true;;
 		r) just_remove=true;;
 		n) name=$OPTARG;;
+		D) set -$OPTARG;;
 		*) false || exit
 	esac
 done
@@ -106,16 +114,20 @@ mapping=${mapping#*create_}
 unit=${mapping#*_}
 quantity=${mapping%"_$unit"}
 unit=${unit%byte*}
-multiplier=1000
 prefix_bytes=$quantity
-for u in \
-	"" kilo mega giga tera peta exa zetta yotta \
-	-bi kibi mebi gibi tebi pebi exbi zebi yobi -fail
+case $unit in
+	*bi) multiplier=1024;;
+	*) multiplier=1000
+esac
+
+for u in "" kilo mega giga tera peta exa zetta yotta -fail
 do
+	case $multiplier in
+		1024) rest=${u#??}; u=${u%"$rest"}bi
+	esac
 	case $u in
 		"$unit") break;;
-		-fail) false;;
-		-bi) multiplier=1024; prefix_bytes=$quantity
+		-fail) false || exit;;
 	esac
 	nx=`expr $prefix_bytes \* $multiplier 2> /dev/null` || continue
 	test $nx -gt $prefix_bytes

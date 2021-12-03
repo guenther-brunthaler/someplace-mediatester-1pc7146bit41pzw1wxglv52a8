@@ -8,7 +8,7 @@
  * to allow disk I/O to run (mostly) in parallel, too. */
 
 #define VERSION_INFO \
- "Version 2021.337\n" \
+ "Version 2021.337.1\n" \
  "Copyright (c) 2017-2021 Guenther Brunthaler. All rights reserved." \
  "\n" \
  "This program is free software.\n" \
@@ -779,6 +779,7 @@ static void report_times_dtor(r4g *rc) {
    R4G_DEFINE_INIT_RPTR(struct report_times_static_resource, *r=, rc, dtor);
    proctimes stopped;
    clock_t cps;
+   rc->rlist= r->saved;
    proctimes_snapshot(&stopped);
    {
       long val;

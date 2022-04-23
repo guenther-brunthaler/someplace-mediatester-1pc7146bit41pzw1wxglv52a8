@@ -8,8 +8,8 @@
  * to allow disk I/O to run (mostly) in parallel, too. */
 
 #define VERSION_INFO \
- "Version 2021.337.2\n" \
- "Copyright (c) 2017-2021 Guenther Brunthaler. All rights reserved." \
+ "Version 2022.42\n" \
+ "Copyright (c) 2017-2022 Guenther Brunthaler. All rights reserved." \
  "\n" \
  "This program is free software.\n" \
  "Distribution is permitted under the terms of the GPLv3."
@@ -758,7 +758,7 @@ struct report_times_static_resource {
 static void report_times(char const *name, time_t seconds) {
    fprintf_c1(
          stderr
-      ,  "%s\t%lu seconds = %.1f minutes = %.3f hours\n"
+      ,  "%s\t%lu seconds = %.1f minutes = %.2f hours\n"
       ,  name
       ,  (unsigned long)seconds
       ,  seconds / 60.

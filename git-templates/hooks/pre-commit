@@ -1,7 +1,7 @@
 #! /bin/sh
-# Version 2019.79
+# Version 2022.41
 
-re='[Vv]ersion 2[0-9]\{3\}[.][0-9]'
+re='[Vv]\(ersion\)\{0,1\} \{0,1\}2[0-9]\{3\}[.][0-9]'
 for f in `git ls-files -m`
 do
 	if grep -q "$re" "$f"

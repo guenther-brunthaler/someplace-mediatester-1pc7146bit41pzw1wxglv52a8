@@ -8,8 +8,8 @@
  * to allow disk I/O to run (mostly) in parallel, too. */
 
 #define VERSION_INFO \
- "Version 2022.42\n" \
- "Copyright (c) 2017-2022 Guenther Brunthaler. All rights reserved." \
+ "Version 2026.314\n" \
+ "Copyright (c) 2017-2026 Guenther Brunthaler. All rights reserved.\n" \
  "\n" \
  "This program is free software.\n" \
  "Distribution is permitted under the terms of the GPLv3."
@@ -92,13 +92,13 @@ static char const msg_malloc_error[]= {
 
 r4g *r4g_c1(void) {
    r4g *rc;
-   if (rc= pthread_getspecific(tgs.resource_context)) return rc;
+   if ((rc = pthread_getspecific(tgs.resource_context)) != NULL) return rc;
    abort();
 }
 
 char const *new_r4g_thread_context_c0(void) {
    r4g *rc;
-   if (!(rc= calloc(1, sizeof *rc))) return msg_malloc_error;
+   if (!(rc = calloc(1, sizeof *rc))) return msg_malloc_error;
    if (!pthread_setspecific(tgs.resource_context, rc)) return 0;
    return "Could not set up per-thread resource context!";
 }
@@ -133,7 +133,7 @@ static void pthread_mutex_unlock_c1(pthread_mutex_t *mutex) {
 
 static void *malloc_c1(size_t bytes) {
    void *buffer;
-   if (!(buffer= malloc(bytes))) ERROR_C1(msg_malloc_error);
+   if (!(buffer = malloc(bytes))) ERROR_C1(msg_malloc_error);
    return buffer;
 }
 
@@ -141,7 +141,7 @@ static void printf_c1(char const *format, ...) {
    va_list args;
    int error;
    va_start(args, format);
-   error= vprintf(format, args) < 0;
+   error = vprintf(format, args) < 0;
    va_end(args);
    if (error) ERROR_C1(msg_write_error);
 }
@@ -150,7 +150,7 @@ static void fprintf_c1(FILE *s, char const *format, ...) {
    va_list args;
    int error;
    va_start(args, format);
-   error= vfprintf(s, format, args) < 0;
+   error = vfprintf(s, format, args) < 0;
    va_end(args);
    if (error) ERROR_C1(msg_write_error);
 }
@@ -163,9 +163,9 @@ struct mutex_resource {
 
 static void mutex_unlocker_dtor(r4g *rc) {
    R4G_DEFINE_INIT_RPTR(struct mutex_resource, *r=, rc, dtor);
-   int procured= r->procured;
-   pthread_mutex_t *mutex= r->mutex;
-   rc->rlist= r->saved;
+   int procured = r->procured;
+   pthread_mutex_t *mutex = r->mutex;
+   rc->rlist = r->saved;
    free(r);
    if (procured) pthread_mutex_unlock_c1(mutex);
 }
@@ -177,11 +177,11 @@ static void mutex_unlocker_dtor(r4g *rc) {
  * list which will unlock the mutex when the status indicates it is currently
  * locked at the time when the destructor of the resource will be invoked. */
 static int *mutex_unlocker_c5(pthread_mutex_t *mutex) {
-   r4g *rc= r4g_c1();
-   struct mutex_resource *r= malloc_c1(sizeof *r);
-   r->procured= 0;
-   r->mutex= mutex;
-   r->saved= rc->rlist; r->dtor= &mutex_unlocker_dtor; rc->rlist= &r->dtor;
+   r4g *rc = r4g_c1();
+   struct mutex_resource *r = malloc_c1(sizeof *r);
+   r->procured = 0;
+   r->mutex = mutex;
+   r->saved = rc->rlist; r->dtor = &mutex_unlocker_dtor; rc->rlist = &r->dtor;
    return &r->procured;
 }
 
@@ -191,14 +191,14 @@ static void *writer_thread(void *unused_dummy) {
    (void)unused_dummy;
    {
       char const *error;
-      if (error= new_r4g_thread_context_c0()) return (void *)error;
+      if ((error = new_r4g_thread_context_c0()) != NULL) return (void *)error;
    }
-   rc= r4g_c1();
-   workers_mutex_procured= mutex_unlocker_c5(&tgs.workers_mutex);
+   rc = r4g_c1();
+   workers_mutex_procured = mutex_unlocker_c5(&tgs.workers_mutex);
    assert(!*workers_mutex_procured);
    /* Lock the mutex before acessing the global work state variables. */
    pthread_mutex_lock_c1(&tgs.workers_mutex);
-   *workers_mutex_procured= 1;
+   *workers_mutex_procured = 1;
    ++tgs.active_threads; /* We just have started. */
    /* Thread main loop. */
    for (;;) {
@@ -222,20 +222,20 @@ static void *writer_thread(void *unused_dummy) {
             uint_fast64_t pos;
             /* Switch buffers so other threads can resume working. */
             if (
-                  tgs.shared_buffer - (left= tgs.shared_buffer_size)
+                  tgs.shared_buffer - (left = tgs.shared_buffer_size)
                == tgs.shared_buffers[0]
             ) {
-               out= tgs.shared_buffers[0];
-               tgs.shared_buffer= tgs.shared_buffers[1];
+               out = tgs.shared_buffers[0];
+               tgs.shared_buffer = tgs.shared_buffers[1];
             } else {
-               out= tgs.shared_buffers[1];
+               out = tgs.shared_buffers[1];
                assert(tgs.shared_buffer - left == out);
-               tgs.shared_buffer= tgs.shared_buffers[0];
+               tgs.shared_buffer = tgs.shared_buffers[0];
             }
-            pos= tgs.pos - left;
-            tgs.shared_buffer_stop= tgs.shared_buffer + left;
+            pos = tgs.pos - left;
+            tgs.shared_buffer_stop = tgs.shared_buffer + left;
             assert(*workers_mutex_procured);
-            *workers_mutex_procured= 0;
+            *workers_mutex_procured = 0;
             pthread_mutex_unlock_c1(&tgs.workers_mutex);
             /* Wake up the other threads so they can start working on the
              * other buffer. */
@@ -244,7 +244,7 @@ static void *writer_thread(void *unused_dummy) {
              * the new buffer. */
             for (;;) {
                ssize_t written;
-               if ((written= write(STDOUT_FILENO, out, left)) <= 0) {
+               if ((written = write(STDOUT_FILENO, out, left)) <= 0) {
                   if (written == 0) break;
                   if (written != -1) {
                      unlikely_error: ERROR_C1(msg_exotic_error);
@@ -272,14 +272,14 @@ static void *writer_thread(void *unused_dummy) {
                   error_c1(rc, msg_write_error);
                }
                if ((size_t)written > left) goto unlikely_error;
-               out+= (size_t)written;
-               pos+= (uint_fast64_t)written;
-               left-= (size_t)written;
+               out += (size_t)written;
+               pos += (uint_fast64_t)written;
+               left -= (size_t)written;
             }
             finished:
             assert(!*workers_mutex_procured);
             pthread_mutex_lock_c1(&tgs.workers_mutex);
-            *workers_mutex_procured= 1;
+            *workers_mutex_procured = 1;
             if (left) {
                /* Output data sink does not accept any more data - we are
                 * done. Try to write some statistics to standard error. */
@@ -295,7 +295,7 @@ static void *writer_thread(void *unused_dummy) {
                   ,  pos, tgs.start_pos, pos - tgs.start_pos
                );
                /* Initiate successful termination. */
-               tgs.shutdown_requested= 1;
+               tgs.shutdown_requested = 1;
                /* Make sure any sleeping threads will wake up to learn
                 * about the shutdown request. */
                pthread_cond_broadcast_c1(&tgs.workers_wakeup_call);
@@ -308,30 +308,30 @@ static void *writer_thread(void *unused_dummy) {
              * do. */
             --tgs.active_threads;
             assert(*workers_mutex_procured);
-            *workers_mutex_procured= 0;
+            *workers_mutex_procured = 0;
             /* Unlock mutex, wait for a broadcast, then lock mutex again. */
             pthread_cond_wait_c1(
                &tgs.workers_wakeup_call, &tgs.workers_mutex
             );
-            *workers_mutex_procured= 1;
+            *workers_mutex_procured = 1;
             ++tgs.active_threads;
          }
       } else {
          /* There is more work to do. Seize the next work segment. */
          pearnd_offset po;
-         uint8_t *work_segment= tgs.shared_buffer;
-         tgs.shared_buffer+= tgs.work_segment_sz;
+         uint8_t *work_segment = tgs.shared_buffer;
+         tgs.shared_buffer += tgs.work_segment_sz;
          pearnd_seek(&po, tgs.pos);
-         tgs.pos+= tgs.work_segment_sz;
+         tgs.pos += tgs.work_segment_sz;
          /* Allow other threads to seize work segments as well. */
-         *workers_mutex_procured= 0;
+         *workers_mutex_procured = 0;
          pthread_mutex_unlock_c1(&tgs.workers_mutex);
          /* Do every worker thread's primary job: Process its work
           * segment. */
          pearnd_generate(work_segment, tgs.work_segment_sz, &po);
          /* See whether we can get the next job. */
          pthread_mutex_lock_c1(&tgs.workers_mutex);
-         *workers_mutex_procured= 1;
+         *workers_mutex_procured = 1;
       }
    }
    release_c1(rc);
@@ -344,14 +344,14 @@ static void *reader_thread(void *unused_dummy) {
    (void)unused_dummy;
    {
       char const *error;
-      if (error= new_r4g_thread_context_c0()) return (void *)error;
+      if ((error = new_r4g_thread_context_c0()) != NULL) return (void *)error;
    }
-   rc= r4g_c1();
-   workers_mutex_procured= mutex_unlocker_c5(&tgs.workers_mutex);
+   rc = r4g_c1();
+   workers_mutex_procured = mutex_unlocker_c5(&tgs.workers_mutex);
    assert(!*workers_mutex_procured);
    /* Lock the mutex before acessing the global work state variables. */
    pthread_mutex_lock_c1(&tgs.workers_mutex);
-   *workers_mutex_procured= 1;
+   *workers_mutex_procured = 1;
    ++tgs.active_threads; /* We just have started. */
    /* Thread main loop. */
    for (;;) {
@@ -382,20 +382,20 @@ struct FILE_mallocated_resource {
 
 static void FILE_mallocated_dtor(r4g *rc) {
    R4G_DEFINE_INIT_RPTR(struct FILE_mallocated_resource, *r=, rc, dtor);
-   FILE *fh= r->handle;
-   rc->rlist= r->saved;
+   FILE *fh = r->handle;
+   rc->rlist = r->saved;
    free(r);
    if (fh && fclose(fh)) error_c1(rc, "Error while closing file!");
 }
 
 static void load_seed(char const *seed_file) {
-   struct FILE_mallocated_resource *f= malloc_c1(sizeof *f);
+   struct FILE_mallocated_resource *f = malloc_c1(sizeof *f);
    FILE *fh;
    r4g *rc;
    r4g_dtor *marker;
-   f->saved= marker= (rc= r4g_c1())->rlist; f->dtor= &FILE_mallocated_dtor;
-   rc->rlist= &f->dtor;
-   if (!(f->handle= fh= fopen(seed_file, "rb"))) {
+   f->saved = marker = (rc = r4g_c1())->rlist; f->dtor = &FILE_mallocated_dtor;
+   rc->rlist = &f->dtor;
+   if (!(f->handle = fh = fopen(seed_file, "rb"))) {
       rd_err: error_c1(rc, "Cannot read seed file!");
    }
    {
@@ -403,7 +403,7 @@ static void load_seed(char const *seed_file) {
       char seed[MAX_SEED_BYTES + 1]; /* 1 byte larger than actually allowed. */
       #undef MAX_SEED_BYTES
       size_t read;
-      if ((read= fread(seed, sizeof *seed, DIM(seed), fh)) == DIM(seed)) {
+      if ((read = fread(seed, sizeof *seed, DIM(seed), fh)) == DIM(seed)) {
          error_c1(
             rc, "Key file for seeding the PRNG is larger than supported!"
          );
@@ -417,20 +417,20 @@ static void load_seed(char const *seed_file) {
 }
 
 static void slow_comparison(void) {
-   uint_fast64_t differences= 0;
+   uint_fast64_t differences = 0;
    uint_fast64_t pos;
    pearnd_offset po;
-   uint8_t *const reference= tgs.shared_buffers[1];
+   uint8_t *const reference = tgs.shared_buffers[1];
    /* Write a header. */
    fprintf_c1(stderr, "\nEX RD A %-8s BYTE OFFSET\n", "XOR");
-   pearnd_seek(&po, pos= tgs.pos);
+   pearnd_seek(&po, pos = tgs.pos);
    for (;;) {
-      uint8_t *in= tgs.shared_buffer;
-      size_t left= tgs.shared_buffer_size;
+      uint8_t *in = tgs.shared_buffer;
+      size_t left = tgs.shared_buffer_size;
       /* Read the next buffer full of input data. */
       for (;;) {
          ssize_t did_read;
-         if ((did_read= read(STDIN_FILENO, in, left)) <= 0) {
+         if ((did_read = read(STDIN_FILENO, in, left)) <= 0) {
             if (did_read == 0) break;
             if (did_read != -1) {
                unlikely_error: ERROR_C1(msg_exotic_error);
@@ -455,29 +455,29 @@ static void slow_comparison(void) {
             ERROR_C1("Read error!");
          }
          if ((size_t)did_read > left) goto unlikely_error;
-         in+= (size_t)did_read;
-         pos+= (uint_fast64_t)did_read;
-         left-= (size_t)did_read;
+         in += (size_t)did_read;
+         pos += (uint_fast64_t)did_read;
+         left -= (size_t)did_read;
       }
       assert(left <= tgs.shared_buffer_size);
-      pos-= left= tgs.shared_buffer_size - left;
+      pos -= left = tgs.shared_buffer_size - left;
       if (left == 0) break;
       assert(left >= 1);
       /* Generate a full buffer of comparison data. */
       pearnd_generate(reference, tgs.shared_buffer_size, &po);
       /* Compare buffer contents. */
-      in= tgs.shared_buffer;
+      in = tgs.shared_buffer;
       {
          size_t i;
-         for (i= 0; i < left; ++i) {
+         for (i = 0; i < left; ++i) {
             if (tgs.mode == mode_diff && in[i] == reference[i]) continue;
             {
                char octet[8];
-               unsigned rd= in[i];
+               unsigned rd = in[i];
                {
-                  unsigned xor= rd ^ reference[i];
-                  unsigned i, mask= 1;
-                  for (i= 8; i--; mask+= mask) {
+                  unsigned xor = rd ^ reference[i];
+                  unsigned i, mask = 1;
+                  for (i = 8; i--; mask += mask) {
                      octet[i]= xor & mask ? '1' : '0';
                   }
                   if (xor) ++differences;
@@ -491,7 +491,7 @@ static void slow_comparison(void) {
             }
          }
       }
-      pos+= left;
+      pos += left;
    }
    finished:
    assert(pos >= tgs.start_pos);
@@ -508,110 +508,110 @@ static void slow_comparison(void) {
    );
 }
 
-static char const usage[]=
-   "Usage: %s [ <options> ... ] <mode> <seed_file> [ <starting_offset> ]\n"
-   "\n"
-   "where\n"
-   "\n"
-   "<mode>: One of the following commands\n"
-   "  write - write PRNG stream to standard output at offset\n"
-   "  verify - compare PRNG data against stream from standard input\n"
-   "  compare - Like verify but show every byte ('should' and 'is')\n"
-   "  diff - Like compare but report only differing bytes\n"
-   "<seed_file>: a binary (or text) file up to 256 bytes PRNG seed\n"
-   "<starting_offset>: byte offset where to start writing/verifying\n"
-   "\n"
-   "Standard input or output should be a block device or a file. When\n"
-   "writing to a file, writing stops when there is no more free space\n"
-   "left in the filesystem containing the file, or when the file has\n"
-   "reached the maximum file size supported by the filesystem.\n"
-   "\n"
-   "The <seed_file> determines which pseudo-random sequence of bytes\n"
-   "will be written to or will be expected to be read from the file\n"
-   "or device. The same <seed_file> needs to be used for a 'write'\n"
-   "command and its matching 'verify' command.\n"
-   "\n"
-   "The contents of <seed_file> are arbitrary and should be created\n"
-   "by something like this:\n"
-   "\n"
-   "$ dd if=/dev/random bs=1 count=16 > my_seed_file.bin\n"
-   "\n"
-   "<options>:\n"
-   "\n"
-   "-t <n>: Use <n> CPU threads for write/verify commands instead of\n"
-   "the autodetected number of available processor cores\n"
-   "\n"
-   "-N: Don't be nice. By default, the program will behave as if it\n"
-   "had been invoked via 'nice' and 'ionice -n 6'. With -N, the\n"
-   "program will not do this and keep its initial niceness settings.\n"
-   "\n"
-   "-F: Don't flush the device's cache when reading from a block\n"
-   "device. This makes comparison of small block devices less\n"
-   "reliable, because one never can be sure whether the data read\n"
-   "came actually from the device or rather from the cache. However,\n"
-   "flushing device buffers is a privileged operation, so\n"
-   "unprivileged users can never read from a block device without\n"
-   "this option, even if they are the owner of the device.\n"
-   "\n"
-   "-V: Display version information\n"
-   "\n"
-   "-h: Display this help\n"
-   "\n"
-   "General usage procedure:\n"
-   "\n"
-   "1. Generate a seed file to be used with all following steps\n"
-   "\n"
-   "2. Fill the block device to be tested using the 'write' command\n"
-   "\n"
-   "   'write' can also fill a filesystem, using up all space. This\n"
-   "   allows to check how much uncompressible data can really be\n"
-   "   stored there, and whether the file has actually been written\n"
-   "   correctly (i. e. whether the filesystem works as it should).\n"
-   "\n"
-   "3. Use 'verify' command to check for differences\n"
-   "\n"
-   "   This reads back the data which has been written before and\n"
-   "   checks whether it is still the same. This should be the case\n"
-   "   if everything is fine.\n"
-   "   \n"
-   "   If it is not, 'verify' stops and reports the offset where the\n"
-   "   first different byte was detected.\n"
-   "   \n"
-   "   Differences mean that the storage medium or filesystem either\n"
-   "   does not reliably write data, or it does not reliably read\n"
-   "   data, or it is lying about its supposed storage capacity.\n"
-   "   Either way, such differences are always a bad sign.\n"
-   "   \n"
-   "   To scan for more differences, you can run the 'verify' command\n"
-   "   again, starting at a higher byte offset.\n"
-   "\n"
-   "4. If 'verify' stopped at differences, use 'compare' or 'diff'\n"
-   "   to show them.\n"
-   "\n"
-   "   For every byte offset, 'compare' shows the byte value which\n"
-   "   was expected, the byte value actually read back, the ASCII\n"
-   "   character corresponding to the value read back, and the bit\n"
-   "   differences (XOR) between both bytes.\n"
-   "   \n"
-   "   'diff' does the same, but only writes output lines for bytes\n"
-   "   which actually differ. (It will therefore never display the\n"
-   "   XOR-value '00000000'.)\n"
-   "   \n"
-   "   This means 'diff' does basically the same as 'verify', but it\n"
-   "   is much, much slower. And unlike 'verify', 'diff' will not\n"
-   "   stop comparing when differences have been found.\n"
-   "   \n"
-   "   Therefore, always use 'verify' first to determine where bytes\n"
-   "   start to differ, then use 'diff' or 'compare' to look what\n"
-   "   exactly is different.\n"
-   "   \n"
-   "   'compare' and 'diff' do not stop output by themselves before\n"
-   "   the end of the file/device has been reached. Their output\n"
-   "   should therefore be piped through 'head' or 'more' in order\n"
-   "   to limit the number of lines displayed.\n"
-   "\n"
-   VERSION_INFO "\n"
-;
+static char const *usage[]= {
+      "Usage: %s [ <options> ... ] <mode> <seed_file> [ <starting_offset> ]\n"
+      "\n"
+      "where\n"
+      "\n"
+      "<mode>: One of the following commands\n"
+      "  write - write PRNG stream to standard output at offset\n"
+      "  verify - compare PRNG data against stream from standard input\n"
+      "  compare - Like verify but show every byte ('should' and 'is')\n"
+      "  diff - Like compare but report only differing bytes\n"
+      "<seed_file>: a binary (or text) file up to 256 bytes PRNG seed\n"
+      "<starting_offset>: byte offset where to start writing/verifying\n"
+      "\n"
+      "Standard input or output should be a block device or a file. When\n"
+      "writing to a file, writing stops when there is no more free space\n"
+      "left in the filesystem containing the file, or when the file has\n"
+      "reached the maximum file size supported by the filesystem.\n"
+      "\n"
+      "The <seed_file> determines which pseudo-random sequence of bytes\n"
+      "will be written to or will be expected to be read from the file\n"
+      "or device. The same <seed_file> needs to be used for a 'write'\n"
+      "command and its matching 'verify' command.\n"
+      "\n"
+      "The contents of <seed_file> are arbitrary and should be created\n"
+      "by something like this:\n"
+      "\n"
+      "$ dd if=/dev/random bs=1 count=16 > my_seed_file.bin\n"
+      "\n"
+      "<options>:\n"
+      "\n"
+      "-t <n>: Use <n> CPU threads for write/verify commands instead of\n"
+      "the autodetected number of available processor cores\n"
+      "\n"
+      "-N: Don't be nice. By default, the program will behave as if it\n"
+      "had been invoked via 'nice' and 'ionice -n 6'. With -N, the\n"
+      "program will not do this and keep its initial niceness settings.\n"
+      "\n"
+      "-F: Don't flush the device's cache when reading from a block\n"
+      "device. This makes comparison of small block devices less\n"
+      "reliable, because one never can be sure whether the data read\n"
+      "came actually from the device or rather from the cache. However,\n"
+      "flushing device buffers is a privileged operation, so\n"
+      "unprivileged users can never read from a block device without\n"
+      "this option, even if they are the owner of the device.\n"
+      "\n"
+      "-V: Display version information\n"
+      "\n"
+      "-h: Display this help\n"
+      "\n"
+      "General usage procedure:\n"
+      "\n"
+      "1. Generate a seed file to be used with all following steps\n"
+      "\n"
+      "2. Fill the block device to be tested using the 'write' command\n"
+      "\n"
+      "   'write' can also fill a filesystem, using up all space. This\n"
+      "   allows to check how much uncompressible data can really be\n"
+      "   stored there, and whether the file has actually been written\n"
+      "   correctly (i. e. whether the filesystem works as it should).\n"
+      "\n"
+      "3. Use 'verify' command to check for differences\n"
+      "\n"
+      "   This reads back the data which has been written before and\n"
+      "   checks whether it is still the same. This should be the case\n"
+      "   if everything is fine.\n"
+      "   \n"
+      "   If it is not, 'verify' stops and reports the offset where the\n"
+      "   first different byte was detected.\n"
+      "   \n"
+      "   Differences mean that the storage medium or filesystem either\n"
+      "   does not reliably write data, or it does not reliably read\n"
+      "   data, or it is lying about its supposed storage capacity.\n"
+      "   Either way, such differences are always a bad sign.\n"
+      "   \n"
+      "   To scan for more differences, you can run the 'verify' command\n"
+      "   again, starting at a higher byte offset.\n"
+      "\n"
+      "4. If 'verify' stopped at differences, use 'compare' or 'diff'\n"
+      "   to show them.\n"
+      "\n"
+      "   For every byte offset, 'compare' shows the byte value which\n"
+      "   was expected, the byte value actually read back, the ASCII\n"
+      "   character corresponding to the value read back, and the bit\n"
+      "   differences (XOR) between both bytes.\n"
+      "   \n"
+      "   'diff' does the same, but only writes output lines for bytes\n"
+      "   which actually differ. (It will therefore never display the\n"
+      "   XOR-value '00000000'.)\n"
+      "   \n"
+      "   This means 'diff' does basically the same as 'verify', but it\n"
+      "   is much, much slower. And unlike 'verify', 'diff' will not\n"
+      "   stop comparing when differences have been found.\n"
+      "   \n"
+      "   Therefore, always use 'verify' first to determine where bytes\n"
+      "   start to differ, then use 'diff' or 'compare' to look what\n"
+      "   exactly is different.\n"
+      "   \n"
+      "   'compare' and 'diff' do not stop output by themselves before\n"
+      "   the end of the file/device has been reached. Their output\n"
+      "   should therefore be piped through 'head' or 'more' in order\n"
+   ,  "   to limit the number of lines displayed.\n"
+      "\n"
+      VERSION_INFO "\n"
+};
 
 struct error_reporting_static_resource {
    r4g_dtor dtor, *saved;
@@ -619,14 +619,14 @@ struct error_reporting_static_resource {
 };
 
 static void error_reporting_dtor(r4g *rc) {
-   char const *em= 0;
+   char const *em = 0;
    R4G_DEFINE_INIT_RPTR( \
       struct error_reporting_static_resource, *c=, rc, dtor \
    );
-   rc->rlist= c->saved;
+   rc->rlist = c->saved;
    if (rc->errors) {
-      if (!(em= rc->static_error_message)) em= msg_exotic_error;
-      if (!*em) em= 0;
+      if (!(em = rc->static_error_message)) em = msg_exotic_error;
+      if (!*em) em = 0;
    }
    if (em) {
       (void)fprintf(stderr, "%s failed: %s\n", c->argv0, em);
@@ -643,8 +643,8 @@ static void resource_context_thread_key_dtor(r4g *rc) {
    /* Clear out slot for main thread context because it has not been
     * allocated dynamically and should therefore not be passed to the
     * thread key's per-thread slot destructor. */
-   int bad= pthread_setspecific(tgs.resource_context, 0);
-   rc->rlist= r->saved;
+   int bad = pthread_setspecific(tgs.resource_context, 0);
+   rc->rlist = r->saved;
    if (pthread_key_delete(tgs.resource_context) || bad) {
       error_c1(rc, msg_exotic_error);
    }
@@ -657,7 +657,7 @@ struct pthread_mutex_static_resource {
 
 static void pthread_mutex_static_dtor(r4g *rc) {
    R4G_DEFINE_INIT_RPTR(struct pthread_mutex_static_resource, *r=, rc, dtor);
-   rc->rlist= r->saved;
+   rc->rlist = r->saved;
    if (pthread_mutex_destroy(r->mutex)) ERROR_C1(msg_exotic_error);
 }
 
@@ -668,16 +668,16 @@ struct pthread_cond_static_resource {
 
 static void pthread_cond_static_dtor(r4g *rc) {
    R4G_DEFINE_INIT_RPTR(struct pthread_cond_static_resource, *r=, rc, dtor);
-   rc->rlist= r->saved;
+   rc->rlist = r->saved;
    if (pthread_cond_destroy(r->cond)) ERROR_C1(msg_exotic_error);
 }
 
 static void shared_buffers_dtor(r4g *rc) {
    {
       unsigned i;
-      for (i= (unsigned)DIM(tgs.shared_buffers); i--; ) {
+      for (i = (unsigned)DIM(tgs.shared_buffers); i--; ) {
          if (tgs.shared_buffers[i]) {
-            void *old= tgs.shared_buffers[i]; tgs.shared_buffers[i]= 0;
+            void *old = tgs.shared_buffers[i]; tgs.shared_buffers[i]= 0;
             if (munmap(old, tgs.shared_buffer_size)) {
                error_c1(rc, msg_exotic_error);
             }
@@ -686,7 +686,7 @@ static void shared_buffers_dtor(r4g *rc) {
    }
    {
       R4G_DEFINE_INIT_RPTR(struct minimal_resource, *r=, rc, dtor);
-      rc->rlist= r->saved;
+      rc->rlist = r->saved;
    }
 }
 
@@ -701,7 +701,7 @@ static void cancel_threads_dtor(r4g *rc) {
    R4G_DEFINE_INIT_RPTR(struct cancel_threads_static_resource, *r=, rc, dtor);
    {
       unsigned i;
-      for (i= r->threads; i--; ) {
+      for (i = r->threads; i--; ) {
          if (r->tvalid[i]) {
             r->tvalid[i]= 0;
             if (rc->errors) {
@@ -723,7 +723,7 @@ static void cancel_threads_dtor(r4g *rc) {
          }
       }
    }
-   rc->rlist= r->saved;
+   rc->rlist = r->saved;
 }
 
 struct mallocated_resource {
@@ -733,18 +733,18 @@ struct mallocated_resource {
 
 static void mallocated_dtor(r4g *rc) {
    R4G_DEFINE_INIT_RPTR(struct mallocated_resource, *r=, rc, dtor);
-   void *buffer= r->buffer;
-   rc->rlist= r->saved;
+   void *buffer = r->buffer;
+   rc->rlist = r->saved;
    free(r);
    free(buffer);
 }
 
 static void *calloc_c5(size_t num_elements, size_t element_size) {
-   struct mallocated_resource *r= malloc_c1(sizeof *r);
+   struct mallocated_resource *r = malloc_c1(sizeof *r);
    r4g *rc;
-   r->saved= (rc= r4g_c1())->rlist;
-   r->dtor= &mallocated_dtor; rc->rlist= &r->dtor;
-   if (!(r->buffer= calloc(num_elements, element_size))) {
+   r->saved = (rc = r4g_c1())->rlist;
+   r->dtor = &mallocated_dtor; rc->rlist = &r->dtor;
+   if (!(r->buffer = calloc(num_elements, element_size))) {
       error_c1(rc, msg_malloc_error);
    }
    return r->buffer;
@@ -770,9 +770,9 @@ static void report_times_dtor(r4g *rc) {
    R4G_DEFINE_INIT_RPTR(struct report_times_static_resource, *r=, rc, dtor);
    struct timespec real;
    struct rusage ru;
-   rc->rlist= r->saved;
+   rc->rlist = r->saved;
    if (clock_gettime(CLOCK_MONOTONIC, &real) < 0) goto unlikely_error;
-   real.tv_sec-= r->started.tv_sec + (
+   real.tv_sec -= r->started.tv_sec + (
       real.tv_nsec < r->started.tv_nsec /* borrow */
    );
    if (getrusage(RUSAGE_SELF, &ru) < 0) unlikely_error: ERROR_C1(0);
@@ -780,6 +780,18 @@ static void report_times_dtor(r4g *rc) {
    report_times("real", real.tv_sec);
    report_times("user", ru.ru_utime.tv_sec);
    report_times("sys", ru.ru_stime.tv_sec);
+}
+
+static void usage_writer(
+      char const *const *strings, size_t num_str, char const *argv0
+   ,  FILE *out
+) {
+   int error, i;
+   error = i = 0;
+   while ((size_t)i != num_str) {
+      error |= fprintf(out, strings[i++], argv0) < 0;
+   }
+   if (out != stderr && error != 0) ERROR_C1(msg_write_error);
 }
 
 #define CEIL_DIV(num, den) (((num) + (den) - 1) / (den))
@@ -790,12 +802,12 @@ int main(int argc, char **argv) {
    static char *tvalid;
    static r4g m;
    char const *argv0;
-   int never_flush= 0;
+   int never_flush = 0;
    (void)setlocale(LC_ALL, ""); /* Enable locale if supported. */
    {
       static struct error_reporting_static_resource r;
-      r.argv0= argv0= argc ? argv[0] : "<unnamed program>";
-      r.saved= m.rlist; r.dtor= &error_reporting_dtor; m.rlist= &r.dtor;
+      r.argv0 = argv0 = argc ? argv[0] : "<unnamed program>";
+      r.saved = m.rlist; r.dtor = &error_reporting_dtor; m.rlist = &r.dtor;
    }
    if (pthread_key_create(&tgs.resource_context, free)) {
       error_c1(
@@ -804,8 +816,8 @@ int main(int argc, char **argv) {
    }
    {
       static struct minimal_resource r;
-      r.saved= m.rlist; r.dtor= &resource_context_thread_key_dtor;
-      m.rlist= &r.dtor;
+      r.saved = m.rlist; r.dtor = &resource_context_thread_key_dtor;
+      m.rlist = &r.dtor;
    }
    if (pthread_setspecific(tgs.resource_context, &m)) {
       error_c1(
@@ -814,17 +826,17 @@ int main(int argc, char **argv) {
    }
    {
       int optind;
-      int be_nice= 1;
+      int be_nice = 1;
       {
          int opt, optpos;
          char const *optarg;
-         optind= optpos= 0;
-         while (opt= getopt_simplest(&optind, &optpos, argc, argv)) {
+         optind = optpos = 0;
+         while ((opt = getopt_simplest(&optind, &optpos, argc, argv)) != 0) {
             switch (opt) {
                case 't':
                   if (
                      !(
-                        optarg= getopt_simplest_mand_arg(
+                        optarg = getopt_simplest_mand_arg(
                            &optind, &optpos, argc, argv
                         )
                      )
@@ -844,10 +856,12 @@ int main(int argc, char **argv) {
                      }
                   }
                   break;
-               case 'N': be_nice= 0; break;
+               case 'N': be_nice = 0; break;
                case 'V': printf_c1("%s\n", VERSION_INFO); goto cleanup;
-               case 'h': printf_c1(usage, argv0); goto cleanup;
-               case 'F': never_flush= 1; break;
+               case 'h':
+                  usage_writer(usage, DIM(usage), argv0, stdout);
+                  goto cleanup;
+               case 'F': never_flush = 1; break;
                default:
                   getopt_simplest_perror_opt(opt);
                   goto error_shown;
@@ -858,16 +872,16 @@ int main(int argc, char **argv) {
       if (optind == argc) goto bad_arguments;
       {
          char const *cmd;
-         if (!strcmp(cmd= argv[optind++], "write")) tgs.mode= mode_write;
-         else if (!strcmp(cmd, "verify")) tgs.mode= mode_verify;
-         else if (!strcmp(cmd, "compare")) tgs.mode= mode_compare;
-         else if (!strcmp(cmd, "diff")) tgs.mode= mode_diff;
+         if (!strcmp(cmd = argv[optind++], "write")) tgs.mode = mode_write;
+         else if (!strcmp(cmd, "verify")) tgs.mode = mode_verify;
+         else if (!strcmp(cmd, "compare")) tgs.mode = mode_compare;
+         else if (!strcmp(cmd, "diff")) tgs.mode = mode_diff;
          else goto bad_arguments;
       }
       if (optind == argc) goto bad_arguments;
       load_seed(argv[optind++]);
       if (optind < argc) {
-         tgs.pos= atou64(argv[optind++]);
+         tgs.pos = atou64(argv[optind++]);
       }
       if (optind != argc) {
          bad_arguments:
@@ -876,22 +890,23 @@ int main(int argc, char **argv) {
             {
                struct stat st;
                out=
-                        isatty(STDOUT_FILENO)
-                     || fstat(STDOUT_FILENO, &st) == 0 && S_ISFIFO(st.st_mode)
+                     isatty(STDOUT_FILENO) || (
+                        fstat(STDOUT_FILENO, &st) == 0 && S_ISFIFO(st.st_mode)
+                     )
                   ?  stdout
                   :  stderr
                ;
             }
             (void)fprintf(out, "%s\n\n", "Invalid arguments!");
-            (void)fprintf(out, usage, argv0);
+            usage_writer(usage, DIM(usage), argv0, out);
          }
          error_shown:
-         m.static_error_message= "";
-         m.errors= 1;
+         m.static_error_message = "";
+         m.errors = 1;
          goto cleanup;
       }
       if (be_nice) {
-         errno= 0;
+         errno = 0;
          if (nice(10) == -1 && errno) {
             error_c1(
                &m, "Could not make the process nice in terms of CPU usage!"
@@ -915,20 +930,20 @@ int main(int argc, char **argv) {
    /* Ignore SIGPIPE because we want it as a possible errno from write(). */
    if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) goto unlikely_error;
    /* Preset global variables for interthread communication. */
-   tgs.work_segments= 64;
+   tgs.work_segments = 64;
    if (pthread_mutex_init(&tgs.workers_mutex, 0)) goto unlikely_error;
    {
       static struct pthread_mutex_static_resource r;
-      r.mutex= &tgs.workers_mutex;
-      r.saved= m.rlist; r.dtor= &pthread_mutex_static_dtor;
-      m.rlist= &r.dtor;
+      r.mutex = &tgs.workers_mutex;
+      r.saved = m.rlist; r.dtor = &pthread_mutex_static_dtor;
+      m.rlist = &r.dtor;
    }
    if (pthread_cond_init(&tgs.workers_wakeup_call, 0)) goto unlikely_error;
    {
       static struct pthread_cond_static_resource r;
-      r.cond= &tgs.workers_wakeup_call;
-      r.saved= m.rlist; r.dtor= &pthread_cond_static_dtor;
-      m.rlist= &r.dtor;
+      r.cond = &tgs.workers_wakeup_call;
+      r.saved = m.rlist; r.dtor = &pthread_cond_static_dtor;
+      m.rlist = &r.dtor;
    }
    /* Determine the best I/O block size, defaulting to the value preset
     * earlier. */
@@ -938,34 +953,34 @@ int main(int argc, char **argv) {
       mode_t mode;
       if (
          fstat(
-               fd= tgs.mode != mode_write ? STDIN_FILENO : STDOUT_FILENO
+               fd = tgs.mode != mode_write ? STDIN_FILENO : STDOUT_FILENO
             ,  &st
          )
       ) {
          error_c1(&m, "Cannot examine file descriptor to be used for I/O!");
       }
-      if (S_ISBLK(mode= st.st_mode)) {
+      if (S_ISBLK(mode = st.st_mode)) {
          /* It's a block device. */
          {
             int logical;
             if (ioctl(fd, BLKSSZGET, &logical) < 0) {
                error_c1(&m, "Unable to determine logical sector size!");
             }
-            if ((size_t)logical > tgs.blksz) tgs.blksz= (size_t)logical;
+            if ((size_t)logical > tgs.blksz) tgs.blksz = (size_t)logical;
          }
          {
             int physical;
             if (ioctl(fd, BLKPBSZGET, &physical) < 0) {
                error_c1(&m, "Unable to determine physical sector size!");
             }
-            if ((size_t)physical > tgs.blksz) tgs.blksz= (size_t)physical;
+            if ((size_t)physical > tgs.blksz) tgs.blksz = (size_t)physical;
          }
          {
             int optimal;
             if (ioctl(fd, BLKIOOPT, &optimal) < 0) {
                error_c1(&m, "Unable to determine optimal sector size!");
             }
-            if ((size_t)optimal > tgs.blksz) tgs.blksz= (size_t)optimal;
+            if ((size_t)optimal > tgs.blksz) tgs.blksz = (size_t)optimal;
          }
          if (
             !never_flush && tgs.mode != mode_write && ioctl(fd, BLKFLSBUF) < 0
@@ -979,25 +994,25 @@ int main(int argc, char **argv) {
          /* Some other kind of data source/sink. Assume the maximum of the
           * MMU page size, the atomic pipe size and the fallback value. */
          long page_size;
-         if ((page_size= sysconf(_SC_PAGESIZE)) == -1) {
+         if ((page_size = sysconf(_SC_PAGESIZE)) == -1) {
             unlikely_error: error_c1(&m, msg_exotic_error);
          }
-         if ((size_t)page_size > tgs.blksz) tgs.blksz= (size_t)page_size;
-         if (PIPE_BUF > tgs.blksz) tgs.blksz= PIPE_BUF;
+         if ((size_t)page_size > tgs.blksz) tgs.blksz = (size_t)page_size;
+         if (PIPE_BUF > tgs.blksz) tgs.blksz = PIPE_BUF;
       }
    }
    {
-      size_t bmask= 512; /* <blksz> must be a power of 2 >= this value. */
+      size_t bmask = 512; /* <blksz> must be a power of 2 >= this value. */
       while (bmask < tgs.blksz) {
          size_t nmask;
-         if (!((nmask= bmask + bmask) > bmask)) {
+         if (!((nmask = bmask + bmask) > bmask)) {
             error_c1(&m, "Could not determine a suitable I/O block size");
          }
-         bmask= nmask;
+         bmask = nmask;
       }
-      tgs.blksz= bmask;
+      tgs.blksz = bmask;
    }
-   if (tgs.start_pos= tgs.pos) {
+   if ((tgs.start_pos = tgs.pos) != 0) {
       if (tgs.pos % tgs.blksz) {
          error_c1(
             &m, "Starting offset must be a multiple of the I/O block size!"
@@ -1019,7 +1034,7 @@ int main(int argc, char **argv) {
          off_t pos;
          if (
             (
-               pos= lseek(
+               pos = lseek(
                         tgs.mode != mode_write
                      ?  STDIN_FILENO
                      :  STDOUT_FILENO
@@ -1036,30 +1051,30 @@ int main(int argc, char **argv) {
    switch (tgs.mode) {
       case mode_compare:
       case mode_diff:
-         threads= 1; 
-         tgs.work_segments= 1;
+         threads = 1; 
+         tgs.work_segments = 1;
          break;
       default:
       {
          long rc;
          unsigned procs;
          if (
-               (rc= sysconf(_SC_NPROCESSORS_ONLN)) == -1
-            || (procs= (unsigned)rc , (long)procs != rc)
+               (rc = sysconf(_SC_NPROCESSORS_ONLN)) == -1
+            || (procs = (unsigned)rc , (long)procs != rc)
          ) {
             error_c1(
                &m, "Could not determine number of available CPU processors!"
             );
          }
-         if (!threads || procs < threads) threads= procs;
+         if (!threads || procs < threads) threads = procs;
       }
-      tgs.work_segments= 64;
+      tgs.work_segments = 64;
       if (threads < tgs.work_segments) {
-         if (threads == 1) tgs.work_segments= 1;
-         tgs.work_segments= tgs.work_segments / threads * threads;
+         if (threads == 1) tgs.work_segments = 1;
+         tgs.work_segments = tgs.work_segments / threads * threads;
          assert(tgs.work_segments >= 1);
       } else {
-         tgs.work_segments= threads;
+         tgs.work_segments = threads;
       }
    }
    /* Most threads will generate PRNG data. Another one does I/O and
@@ -1072,7 +1087,7 @@ int main(int argc, char **argv) {
    tgs.work_segment_sz=
       CEIL_DIV(tgs.work_segment_sz, tgs.blksz) * tgs.blksz
    ;
-   tgs.shared_buffer_size= tgs.work_segment_sz * tgs.work_segments;
+   tgs.shared_buffer_size = tgs.work_segment_sz * tgs.work_segments;
    fprintf_c1(
          stderr
       ,  "Starting %s offset: %" PRIdFAST64 " bytes\n"
@@ -1098,11 +1113,11 @@ int main(int argc, char **argv) {
    );
    {
       static struct minimal_resource r;
-      r.saved= m.rlist; r.dtor= &shared_buffers_dtor; m.rlist= &r.dtor;
+      r.saved = m.rlist; r.dtor = &shared_buffers_dtor; m.rlist = &r.dtor;
    }
    {
       unsigned i;
-      for (i= (unsigned)DIM(tgs.shared_buffers); i--; ) {
+      for (i = (unsigned)DIM(tgs.shared_buffers); i--; ) {
          if (
             (
                tgs.shared_buffers[i]= mmap(
@@ -1116,19 +1131,19 @@ int main(int argc, char **argv) {
       }
    }
    tgs.shared_buffer_stop=
-      (tgs.shared_buffer= tgs.shared_buffers[0]) + tgs.shared_buffer_size
+      (tgs.shared_buffer = tgs.shared_buffers[0]) + tgs.shared_buffer_size
    ;
    {
       static struct report_times_static_resource r;
       if (clock_gettime(CLOCK_MONOTONIC, &r.started) < 0) goto unlikely_error;
-      r.saved= m.rlist; r.dtor= &report_times_dtor; m.rlist= &r.dtor;
+      r.saved = m.rlist; r.dtor = &report_times_dtor; m.rlist = &r.dtor;
    }
    switch (tgs.mode) {
       case mode_verify:
          /* In verify mode, we start with a "finished" buffer, forcing the
           * next buffer to be read as the first worker thread action. */
          if (tgs.mode != mode_write) {
-            tgs.shared_buffer= (void *)tgs.shared_buffer_stop;
+            tgs.shared_buffer = (void *)tgs.shared_buffer_stop;
          }
          /* Fall through. */
       default: break; /* To avoid switch-case coverage warnings. */
@@ -1139,16 +1154,16 @@ int main(int argc, char **argv) {
       slow_comparison();
       goto finished;
    }
-   tid= calloc_c5(threads, sizeof *tid);
-   tvalid= calloc_c5(threads, sizeof *tvalid);
+   tid = calloc_c5(threads, sizeof *tid);
+   tvalid = calloc_c5(threads, sizeof *tvalid);
    {
       static struct cancel_threads_static_resource r;
-      r.threads= threads; r.tid= tid; r.tvalid= tvalid;
-      r.saved= m.rlist; r.dtor= &cancel_threads_dtor; m.rlist= &r.dtor;
+      r.threads = threads; r.tid = tid; r.tvalid = tvalid;
+      r.saved = m.rlist; r.dtor = &cancel_threads_dtor; m.rlist = &r.dtor;
    }
    {
       unsigned i;
-      for (i= threads; i--; ) {
+      for (i = threads; i--; ) {
          if (
             pthread_create(
                   &tid[i], 0

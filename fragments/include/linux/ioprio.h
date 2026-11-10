@@ -7,10 +7,12 @@
 
 /* SPDX-License-Identifier: GPL-2.0 */
 
-#define IOPRIO_CLASS_SHIFT	(13)
-#define IOPRIO_PRIO_MASK	((1UL << IOPRIO_CLASS_SHIFT) - 1)
+#define IOPRIO_CLASS_SHIFT (13)
+#define IOPRIO_PRIO_MASK ((1UL << IOPRIO_CLASS_SHIFT) - 1)
 
-#define IOPRIO_PRIO_VALUE(class, data)	(((class) << IOPRIO_CLASS_SHIFT) | data)
+#define IOPRIO_PRIO_VALUE(class, data) ( \
+   ((class) << IOPRIO_CLASS_SHIFT) | (data) \
+)
 
 enum {
 	IOPRIO_CLASS_NONE,

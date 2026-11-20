@@ -8,7 +8,7 @@
  * to allow disk I/O to run (mostly) in parallel, too. */
 
 #define VERSION_INFO \
- "Version 2026.314\n" \
+ "Version 2026.324\n" \
  "Copyright (c) 2017-2026 Guenther Brunthaler. All rights reserved.\n" \
  "\n" \
  "This program is free software.\n" \
@@ -32,6 +32,12 @@
     * MAP_ANONYMOUS <sys/mman.h>
     * SYS_ioprio_set <sys/syscall.h> */
     #define _GNU_SOURCE
+#endif
+
+#ifndef _XOPEN_SOURCE
+   /* Enable the following required definitions:
+    * fsync <unistd.h> */
+    #define _XOPEN_SOURCE
 #endif
 
 #include <r4g/r4g_u0ywydbuiziuzssqsi5l0mdid.h>
@@ -86,7 +92,7 @@ static struct {
    pthread_key_t resource_context; /* For r4g_c1(). */
 } tgs; /* Thread global storage */
 
-static char const msg_malloc_error[]= {
+static char const msg_malloc_error[] = {
    "Memory allocation failure!"
 };
 
@@ -103,11 +109,11 @@ char const *new_r4g_thread_context_c0(void) {
    return "Could not set up per-thread resource context!";
 }
 
-static char const msg_exotic_error[]= {
+static char const msg_exotic_error[] = {
    "Unexpected error! (This should normally never happen.)"
 };
 
-static char const msg_write_error[]= {"Write error!"};
+static char const msg_write_error[] = {"Write error!"};
 
 static void pthread_mutex_lock_c1(pthread_mutex_t *mutex) {
    if (!pthread_mutex_lock(mutex)) return;
@@ -162,7 +168,7 @@ struct mutex_resource {
 };
 
 static void mutex_unlocker_dtor(r4g *rc) {
-   R4G_DEFINE_INIT_RPTR(struct mutex_resource, *r=, rc, dtor);
+   R4G_DEFINE_INIT_RPTR(struct mutex_resource, *r =, rc, dtor);
    int procured = r->procured;
    pthread_mutex_t *mutex = r->mutex;
    rc->rlist = r->saved;
@@ -381,7 +387,7 @@ struct FILE_mallocated_resource {
 };
 
 static void FILE_mallocated_dtor(r4g *rc) {
-   R4G_DEFINE_INIT_RPTR(struct FILE_mallocated_resource, *r=, rc, dtor);
+   R4G_DEFINE_INIT_RPTR(struct FILE_mallocated_resource, *r =, rc, dtor);
    FILE *fh = r->handle;
    rc->rlist = r->saved;
    free(r);
@@ -422,7 +428,13 @@ static void slow_comparison(void) {
    pearnd_offset po;
    uint8_t *const reference = tgs.shared_buffers[1];
    /* Write a header. */
-   fprintf_c1(stderr, "\nEX RD A %-8s BYTE OFFSET\n", "XOR");
+   fprintf_c1(
+         stderr
+      ,  "\nLegend: EX = expected value, RD = value actually read,\n"
+         "A = RD as ASCII, XOR = Differing bits between EX and RD.\n"
+         "\n"
+         "EX RD A %-8s BYTE OFFSET\n", "XOR"
+   );
    pearnd_seek(&po, pos = tgs.pos);
    for (;;) {
       uint8_t *in = tgs.shared_buffer;
@@ -469,10 +481,11 @@ static void slow_comparison(void) {
       in = tgs.shared_buffer;
       {
          size_t i;
+         char octet[8 + 1];
+         octet[8] = '\0';
          for (i = 0; i < left; ++i) {
             if (tgs.mode == mode_diff && in[i] == reference[i]) continue;
             {
-               char octet[8];
                unsigned rd = in[i];
                {
                   unsigned xor = rd ^ reference[i];
@@ -483,7 +496,7 @@ static void slow_comparison(void) {
                   if (xor) ++differences;
                }
                printf_c1(
-                     "%02x %02x %c %8s %" PRIuFAST64 "\n"
+                     "%02x %02x %c %-8s %" PRIuFAST64 "\n"
                   ,  (unsigned)reference[i], rd
                   ,  rd >= 0x20 && rd < 0x7f ? rd : '.'
                   ,  octet, pos + i
@@ -545,10 +558,13 @@ static char const *usage[]= {
       "had been invoked via 'nice' and 'ionice -n 6'. With -N, the\n"
       "program will not do this and keep its initial niceness settings.\n"
       "\n"
-      "-F: Don't flush the device's cache when reading from a block\n"
-      "device. This makes comparison of small block devices less\n"
-      "reliable, because one never can be sure whether the data read\n"
-      "came actually from the device or rather from the cache. However,\n"
+      "-F: Don't flush the device's cache before reading from a block\n"
+      "device or after writing to it. This makes comparison of small\n"
+      "block devices less reliable, because one never can be sure\n"
+      "whether the data read came actually from the device or rather\n"
+      "from the cache. It also makes timings less accurate, because the\n"
+      "data written to a device might still be in the operating\n"
+      "system's write cache and not on the device yet. However,\n"
       "flushing device buffers is a privileged operation, so\n"
       "unprivileged users can never read from a block device without\n"
       "this option, even if they are the owner of the device.\n"
@@ -605,10 +621,10 @@ static char const *usage[]= {
       "   start to differ, then use 'diff' or 'compare' to look what\n"
       "   exactly is different.\n"
       "   \n"
-      "   'compare' and 'diff' do not stop output by themselves before\n"
+   ,  "   'compare' and 'diff' do not stop output by themselves before\n"
       "   the end of the file/device has been reached. Their output\n"
       "   should therefore be piped through 'head' or 'more' in order\n"
-   ,  "   to limit the number of lines displayed.\n"
+      "   to limit the number of lines displayed.\n"
       "\n"
       VERSION_INFO "\n"
 };
@@ -639,7 +655,7 @@ struct minimal_resource {
 };
 
 static void resource_context_thread_key_dtor(r4g *rc) {
-   R4G_DEFINE_INIT_RPTR(struct minimal_resource, *r=, rc, dtor);
+   R4G_DEFINE_INIT_RPTR(struct minimal_resource, *r =, rc, dtor);
    /* Clear out slot for main thread context because it has not been
     * allocated dynamically and should therefore not be passed to the
     * thread key's per-thread slot destructor. */
@@ -656,7 +672,7 @@ struct pthread_mutex_static_resource {
 };
 
 static void pthread_mutex_static_dtor(r4g *rc) {
-   R4G_DEFINE_INIT_RPTR(struct pthread_mutex_static_resource, *r=, rc, dtor);
+   R4G_DEFINE_INIT_RPTR(struct pthread_mutex_static_resource, *r =, rc, dtor);
    rc->rlist = r->saved;
    if (pthread_mutex_destroy(r->mutex)) ERROR_C1(msg_exotic_error);
 }
@@ -667,7 +683,7 @@ struct pthread_cond_static_resource {
 };
 
 static void pthread_cond_static_dtor(r4g *rc) {
-   R4G_DEFINE_INIT_RPTR(struct pthread_cond_static_resource, *r=, rc, dtor);
+   R4G_DEFINE_INIT_RPTR(struct pthread_cond_static_resource, *r =, rc, dtor);
    rc->rlist = r->saved;
    if (pthread_cond_destroy(r->cond)) ERROR_C1(msg_exotic_error);
 }
@@ -685,7 +701,7 @@ static void shared_buffers_dtor(r4g *rc) {
       }
    }
    {
-      R4G_DEFINE_INIT_RPTR(struct minimal_resource, *r=, rc, dtor);
+      R4G_DEFINE_INIT_RPTR(struct minimal_resource, *r =, rc, dtor);
       rc->rlist = r->saved;
    }
 }
@@ -698,7 +714,7 @@ struct cancel_threads_static_resource {
 };
 
 static void cancel_threads_dtor(r4g *rc) {
-   R4G_DEFINE_INIT_RPTR(struct cancel_threads_static_resource, *r=, rc, dtor);
+   R4G_DEFINE_INIT_RPTR(struct cancel_threads_static_resource, *r =, rc, dtor);
    {
       unsigned i;
       for (i = r->threads; i--; ) {
@@ -732,7 +748,7 @@ struct mallocated_resource {
 };
 
 static void mallocated_dtor(r4g *rc) {
-   R4G_DEFINE_INIT_RPTR(struct mallocated_resource, *r=, rc, dtor);
+   R4G_DEFINE_INIT_RPTR(struct mallocated_resource, *r =, rc, dtor);
    void *buffer = r->buffer;
    rc->rlist = r->saved;
    free(r);
@@ -750,27 +766,53 @@ static void *calloc_c5(size_t num_elements, size_t element_size) {
    return r->buffer;
 }
 
-struct report_times_static_resource {
+struct flusher_resource {
+   int fd, flsh_blk;
+   r4g_dtor dtor, *saved;
+};
+
+static void flusher_dtor(r4g *rc) {
+   int fd, flsh_blk;
+   {
+      R4G_DEFINE_INIT_RPTR(struct flusher_resource, *r =, rc, dtor);
+      fd = r->fd; flsh_blk = r->flsh_blk;
+      rc->rlist = r->saved;
+      free(r);
+   }
+   if (fsync(fd) != 0) {
+       error_c1(rc, "Unable to flush output buffer after write operation!");
+   }
+   if (flsh_blk && ioctl(fd, BLKFLSBUF) < 0) {
+       error_c1(
+          rc, "Unable to flush block device write cache after write operation!"
+       );
+   }
+}
+
+struct report_times_resource {
    struct timespec started;
+   int running;
    r4g_dtor dtor, *saved;
 };
 
 static void report_times(char const *name, time_t seconds) {
    fprintf_c1(
          stderr
-      ,  "%s\t%lu seconds = %.1f minutes = %.2f hours\n"
+      ,  "%s\t%lu seconds = %.1f minutes = %.2f hours = %.3f days\n"
       ,  name
       ,  (unsigned long)seconds
       ,  seconds / 60.
       ,  seconds / (60. * 60)
+      ,  seconds / (60. * 60 * 24)
    );
 }
 
 static void report_times_dtor(r4g *rc) {
-   R4G_DEFINE_INIT_RPTR(struct report_times_static_resource, *r=, rc, dtor);
+   R4G_DEFINE_INIT_RPTR(struct report_times_resource, *r =, rc, dtor);
    struct timespec real;
    struct rusage ru;
    rc->rlist = r->saved;
+   if (!r->running) return;
    if (clock_gettime(CLOCK_MONOTONIC, &real) < 0) goto unlikely_error;
    real.tv_sec -= r->started.tv_sec + (
       real.tv_nsec < r->started.tv_nsec /* borrow */
@@ -803,6 +845,7 @@ int main(int argc, char **argv) {
    static r4g m;
    char const *argv0;
    int never_flush = 0;
+   struct report_times_resource timing;
    (void)setlocale(LC_ALL, ""); /* Enable locale if supported. */
    {
       static struct error_reporting_static_resource r;
@@ -824,6 +867,8 @@ int main(int argc, char **argv) {
          &m, "Could not set error-handling context for main thread!"
       );
    }
+   timing.running = 0; timing.saved = m.rlist;
+   timing.dtor = &report_times_dtor; m.rlist = &timing.dtor;
    {
       int optind;
       int be_nice = 1;
@@ -990,6 +1035,11 @@ int main(int argc, char **argv) {
              );
          }
       }
+      if (tgs.mode == mode_write) {
+         struct flusher_resource *r = malloc_c1(sizeof *r);
+         r->fd = fd; r->flsh_blk = !never_flush && S_ISBLK(mode);
+         r->saved = m.rlist; r->dtor = &flusher_dtor; m.rlist = &r->dtor;
+      }
       if (!tgs.blksz) {
          /* Some other kind of data source/sink. Assume the maximum of the
           * MMU page size, the atomic pipe size and the fallback value. */
@@ -1133,10 +1183,14 @@ int main(int argc, char **argv) {
    tgs.shared_buffer_stop=
       (tgs.shared_buffer = tgs.shared_buffers[0]) + tgs.shared_buffer_size
    ;
-   {
-      static struct report_times_static_resource r;
-      if (clock_gettime(CLOCK_MONOTONIC, &r.started) < 0) goto unlikely_error;
-      r.saved = m.rlist; r.dtor = &report_times_dtor; m.rlist = &r.dtor;
+   if (
+      !(
+         timing.running = (
+            clock_gettime(CLOCK_MONOTONIC, &timing.started) >= 0
+         )
+      )
+   ) {
+      goto unlikely_error;
    }
    switch (tgs.mode) {
       case mode_verify:
